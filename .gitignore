@@ -1,0 +1,22 @@
+# Generated / cached data
+/tile_cache/
+trip.gpx
+
+# Rendered overlay output (final renders + intermediate work files)
+/overlays/
+/overlays_test/
+
+# Source dashcam footage and other video files -- not part of the project
+*.mp4
+*.MP4
+
+# Ad-hoc screenshots
+Screenshot*.png
+
+# Early scratch/debug scripts, superseded by lib/novatek_gps.rb
+decode_record.rb
+gpx.fmt
+cfg_dynzoom.yml
+
+# Local tool settings
+/.claude/

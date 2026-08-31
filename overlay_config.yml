@@ -1,0 +1,67 @@
+# Dashcam GPS overlay - render configuration.
+# Edit values below. Each setting lists its valid choices in a comment.
+
+trip:
+  gpx_file: trip.gpx            # output of gps_extractor.rb
+  clips_dir: .                  # folder containing source MP4 clips
+  utc_offset_hours: 0           # must match what you passed to gps_extractor.rb
+
+output:
+  mode: per_clip                # per_clip | merged
+  resolution: "3840x2160"       # WxH of your edit timeline -- NOT baked into the render (which is inset-only,
+                                 # for a ~50x smaller/faster file); used only to print a suggested Resolve
+                                 # Transform position matching inset.corner/margin_px below
+  fps: 60                       # set to match your actual edit timeline, not the source clips
+  codec: prores4444             # prores4444 | png_sequence
+  directory: ./overlays
+
+map:
+  tile_provider: osm            # osm | custom
+  custom_tile_url_template: ""  # only used when tile_provider: custom, e.g. "https://.../{z}/{x}/{y}.png"
+  custom_tile_api_key: ""       # only used when tile_provider: custom, if the provider needs one
+  tile_cache_dir: ./tile_cache
+  rotation_mode: north_up       # north_up | heading_up
+
+  window_mode: fixed_radius     # fixed_radius | fixed_zoom | dynamic_speed -- only the matching block below is used
+
+  fixed_radius:
+    radius_meters: 150          # constant real-world radius shown around current position, regardless of speed
+
+  fixed_zoom:
+    zoom_level: 16               # constant OSM tile zoom level -- felt scale then depends on inset size_px
+
+  dynamic_speed:
+    min_radius_meters: 150      # radius shown while stopped / moving slowly
+    max_radius_meters: 600      # radius shown at or above max_speed_kmh
+    max_speed_kmh: 80           # speed at which max_radius_meters is reached; scales linearly below this
+
+inset:
+  size_px: 400                  # rendered clip is exactly size_px x size_px -- place at 1:1 scale in Resolve
+  corner: bottom_right          # bottom_right | bottom_left | top_right | top_left -- informational only, used
+                                 # (with margin_px and output.resolution) to print a suggested Resolve position
+  margin_px: 40
+  shape: rounded_rect           # rounded_rect | rect | circle
+  border:
+    enabled: true
+    width_px: 4
+    color: "#FFFFFFCC"
+
+route:
+  style: two_tone               # two_tone | single_color
+  traveled_color: "#FF3B30"     # must be fully opaque (no alpha) -- see mosaic_renderer.rb's draw_thick_polyline!
+  upcoming_color: "#BBBBBB"     # must be fully opaque (no alpha) -- see mosaic_renderer.rb's draw_thick_polyline!
+  line_width_px: 2
+
+position_marker:
+  enabled: true
+  color: "#1A73E8"
+  radius_px: 8
+  outline_color: "#FFFFFFFF"
+  outline_width_px: 2
+
+speed_hud:
+  enabled: false                # left off for now, per your call -- flip to true to enable later
+  position: attached            # attached | separate_corner
+  unit: kmh                     # matches gps_extractor.rb's GPX <speed> unit
+
+extras: []                       # zero or more of: north_arrow, scale_bar, timestamp
