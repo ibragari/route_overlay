@@ -70,6 +70,36 @@ def ensure_trip_gpx(config, run_dir)
   gpx_path
 end
 
+def in_privacy_zone?(point, zones)
+  zones.any? do |z|
+    dlat = (point.lat - z.center_lat) * 111_320
+    dlon = (point.lon - z.center_lon) * 111_320 * Math.cos(point.lat * Math::PI / 180.0)
+    Math.sqrt((dlat**2) + (dlon**2)) <= z.radius_meters
+  end
+end
+
+# Splits trip_points into maximal runs of consecutive points that fall
+# outside every configured route.privacy_zones circle, dropping any point
+# that falls inside one entirely -- so the route line stops before a zone
+# and resumes after it, rather than being drawn through it or jumping
+# straight across the gap as one continuous line.
+def route_runs(trip_points, zones)
+  return [trip_points] if zones.empty?
+
+  runs = []
+  current = []
+  trip_points.each do |p|
+    if in_privacy_zone?(p, zones)
+      runs << current unless current.empty?
+      current = []
+    else
+      current << p
+    end
+  end
+  runs << current unless current.empty?
+  runs
+end
+
 # crop's x/y must land on whole mosaic pixels, so panning precision is
 # capped at one mosaic pixel. At realistic (slow) speeds and a tight radius,
 # one real second of movement can be under one mosaic pixel, making the pan
@@ -302,8 +332,10 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
     mosaic = MOSAIC_RENDERER_CLASS.new(tile_fetcher, zoom: zoom, center_lon: clip_center_lon,
                                                       center_lat: clip_center_lat, tile_radius: tile_radius)
 
-    all_pixel_points = trip_points.map { |p| mosaic.to_pixel(p.lon, p.lat) }
-    variant = mosaic.with_route(all_pixel_points, config.route.color, config.route.line_width_px)
+    pixel_point_runs = route_runs(trip_points, config.route.privacy_zones || []).map do |run|
+      run.map { |p| mosaic.to_pixel(p.lon, p.lat) }
+    end
+    variant = mosaic.with_route(pixel_point_runs, config.route.color, config.route.line_width_px)
     variant_path = File.join(work_dir, "route.png")
     save_variant_image(variant, variant_path)
     puts "[#{clip_name}] built map mosaic in #{format('%.1f', Time.now - mosaic_started_at)}s"

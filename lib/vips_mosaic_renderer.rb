@@ -52,11 +52,16 @@ class VipsMosaicRenderer
   end
 
   # Draws the route (in a single color) on this mosaic and returns a new
-  # image -- pixel_points is typically the whole trip's points; ones outside
-  # this mosaic's bounds are silently dropped by vips' drawing ops, so
-  # there's no need to pre-filter them.
-  def with_route(pixel_points, color, width_px)
-    draw_thick_polyline(@canvas, pixel_points, color, width_px)
+  # image. pixel_point_runs is an array of point-arrays, each drawn as its
+  # own connected polyline -- more than one run happens when
+  # route.privacy_zones splits the trip's points around a zone (see
+  # overlay_generator.rb's route_runs), so the line stops before it and
+  # resumes after rather than jumping straight across the gap. Typically
+  # covers the whole trip's points; ones outside this mosaic's bounds are
+  # silently dropped by vips' drawing ops, so there's no need to pre-filter
+  # for that.
+  def with_route(pixel_point_runs, color, width_px)
+    pixel_point_runs.reduce(@canvas) { |canvas, points| draw_thick_polyline(canvas, points, color, width_px) }
   end
 
   private

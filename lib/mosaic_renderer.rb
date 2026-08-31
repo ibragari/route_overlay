@@ -88,12 +88,17 @@ class MosaicRenderer
   end
 
   # Draws the route (in a single color) on a fresh copy of this mosaic and
-  # returns it. pixel_points is typically the whole trip's points -- ones
-  # that land outside this mosaic's bounds are silently dropped by
-  # ChunkyPNG's drawing ops, so there's no need to pre-filter them.
-  def with_route(pixel_points, color, width_px)
+  # returns it. pixel_point_runs is an array of point-arrays, each drawn as
+  # its own connected polyline -- more than one run happens when
+  # route.privacy_zones splits the trip's points around a zone (see
+  # overlay_generator.rb's route_runs), so the line stops before it and
+  # resumes after rather than jumping straight across the gap. Typically
+  # covers the whole trip's points -- ones that land outside this mosaic's
+  # bounds are silently dropped by ChunkyPNG's drawing ops, so there's no
+  # need to pre-filter for that.
+  def with_route(pixel_point_runs, color, width_px)
     variant = @canvas.crop(0, 0, @canvas.width, @canvas.height) # non-mutating clone
-    draw_thick_polyline!(variant, pixel_points, color, width_px)
+    pixel_point_runs.each { |points| draw_thick_polyline!(variant, points, color, width_px) }
     variant
   end
 end

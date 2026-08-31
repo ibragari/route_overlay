@@ -110,6 +110,9 @@ scripts by their full path instead — but it's what makes step 3 below just
   rendered square.
 - `route.color`, `route.line_width_px`, `position_marker.*` — route line and
   marker colors/width.
+- `route.privacy_zones` — zero or more `{center_lat, center_lon,
+  radius_meters}` circles the route line is never drawn inside (e.g. to hide
+  it near home) — the line stops before entering one and resumes after.
 - `output.codec` — `prores4444` (alpha video) or `png_sequence`.
 
 **3. `cd` into your trip's clips folder, then render:**
@@ -157,6 +160,9 @@ folder.
   clip's own portion of the trip (not the whole trip) plus the visible pan
   radius — kept simple and fast on purpose; see "What's not done yet" for
   the two-tone traveled/upcoming reveal this replaced.
+- `route.privacy_zones`: circular no-draw zones for the route line (e.g. to
+  hide it near home) — the line stops before a zone and resumes after,
+  rather than being drawn through it or jumping straight across the gap.
 - Rotating chevron position marker matching the GPX-derived compass course.
 - North-up map orientation with smooth, sub-pixel-accurate panning
   (no visible per-second "jump" between map positions).
