@@ -20,3 +20,11 @@ cfg_dynzoom.yml
 
 # Local tool settings
 /.claude/
+
+# Optional vendored libvips binaries (see lib/vips_support.rb) -- large,
+# platform-specific, fetched on demand, not part of the source
+/vendor/
+
+# Reference clone of another project (gopro-dashboard-overlay), not part of
+# this one -- it's its own git repo
+/gopro-dashboard-overlay/

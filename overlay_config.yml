@@ -47,9 +47,7 @@ inset:
     color: "#FFFFFFCC"
 
 route:
-  style: two_tone               # two_tone | single_color
-  traveled_color: "#FF3B30"     # must be fully opaque (no alpha) -- see mosaic_renderer.rb's draw_thick_polyline!
-  upcoming_color: "#BBBBBB"     # must be fully opaque (no alpha) -- see mosaic_renderer.rb's draw_thick_polyline!
+  color: "#FF3B30"              # must be fully opaque (no alpha) -- see mosaic_renderer.rb's draw_thick_polyline!
   line_width_px: 2
 
 position_marker:

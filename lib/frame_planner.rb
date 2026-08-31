@@ -2,8 +2,9 @@
 
 # Computes, for each output frame of a clip's overlay, the interpolated
 # lon/lat of the current position and the index of the last real GPX
-# trackpoint reached (the "reveal index" -- see mosaic_renderer.rb). Both are
-# derived from a single monotonic sweep since frame time only ever increases.
+# trackpoint reached (reveal_index -- -1 before the trip's very first fix,
+# see overlay_generator.rb's blank leading frames). Both are derived from a
+# single monotonic sweep since frame time only ever increases.
 class FramePlanner
   FrameState = Struct.new(:frame_index, :lon, :lat, :speed_kmh, :course_deg, :reveal_index, keyword_init: true)
 
@@ -52,17 +53,5 @@ class FramePlanner
   def lerp_angle_deg(a0, a1, frac)
     diff = ((a1 - a0 + 540) % 360) - 180
     (a0 + (diff * frac)) % 360
-  end
-
-  public
-
-  # Groups consecutive frames sharing the same reveal_index into runs, each
-  # with a frame count -- used to build the concat demuxer's per-image
-  # durations on the exact same frame grid as the crop sendcmd script, so the
-  # two never drift apart.
-  def self.reveal_runs(frame_states)
-    frame_states.chunk_while { |a, b| a.reveal_index == b.reveal_index }.map do |run|
-      { reveal_index: run.first.reveal_index, frame_count: run.size }
-    end
   end
 end

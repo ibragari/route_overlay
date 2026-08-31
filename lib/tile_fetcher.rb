@@ -3,6 +3,7 @@
 require "net/http"
 require "uri"
 require "fileutils"
+require "chunky_png"
 
 # Fetches OSM (or a custom XYZ) tile server, caching every tile to disk so
 # it is only ever downloaded once across repeated runs (including --nframes
@@ -17,6 +18,7 @@ class TileFetcher
     @custom_url_template = custom_url_template
     @custom_api_key = custom_api_key
     @last_request_at = nil
+    @image_cache = {}
     FileUtils.mkdir_p(@cache_dir)
   end
 
@@ -30,6 +32,29 @@ class TileFetcher
     data = download(zoom, x, y)
     File.binwrite(path, data)
     path
+  end
+
+  # Same as fetch, but returns a decoded ChunkyPNG::Image, kept in an
+  # in-memory cache for the lifetime of this TileFetcher. Consecutive local
+  # mosaics built for a clip's reveal runs (see MosaicRenderer) overlap
+  # heavily -- the same handful of tiles get reused across most of them --
+  # so without this, the same on-disk PNG gets re-read and re-decoded from
+  # scratch every time it's needed, which was dwarfing the actual render
+  # time. ChunkyPNG's Canvas#replace! only ever reads from its source image,
+  # never mutates it, so sharing one decoded instance across many canvases
+  # is safe.
+  def fetch_image(zoom, x, y)
+    key = [zoom, x, y]
+    @image_cache[key] ||= ChunkyPNG::Image.from_file(fetch(zoom, x, y))
+  end
+
+  # Same idea as fetch_image, but returns a decoded Vips::Image instead, for
+  # VipsMosaicRenderer. Only ever called once vips is confirmed available
+  # (see VipsSupport) -- doesn't require "vips" itself.
+  def fetch_vips_image(zoom, x, y)
+    key = [zoom, x, y]
+    @vips_image_cache ||= {}
+    @vips_image_cache[key] ||= Vips::Image.new_from_file(fetch(zoom, x, y))
   end
 
   private

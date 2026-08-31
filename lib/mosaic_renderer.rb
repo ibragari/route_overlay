@@ -4,22 +4,18 @@ require "chunky_png"
 require_relative "web_mercator"
 
 # Builds one small stitched-tile canvas centered on a lon/lat point, covering
-# tile_radius tiles in every direction (so every instance built with the same
-# tile_radius is pixel-for-pixel the same size, regardless of where it's
-# centered -- needed so ffmpeg's concat demuxer can splice a sequence of
-# these together as one uniform-frame-size stream), and draws whatever
-# portion of the route falls within it in two tones, traveled vs upcoming.
+# tile_radius tiles in every direction, and draws the route on it in a single
+# color -- one instance covers one clip's own portion of the trip (sized to
+# comfortably contain it plus the visible pan radius), not the whole trip,
+# so a long multi-hour trip doesn't blow this up the way rendering the whole
+# trip as one mosaic would.
 #
-# One instance covers one "reveal run" (see FramePlanner.reveal_runs) rather
-# than the whole trip -- a run's pan only ever needs the area around that
-# run's own couple of GPS points, not the entire route, so building one
-# mosaic per run keeps each one small no matter how long the overall trip is.
-#
-# Route colors are expected to be fully opaque. Route/marker drawing works by
-# stamping many overlapping circles along the path (see draw_thick_polyline!)
-# -- with a semi-transparent color, overlapping stamps would visibly "build
-# up" darker at every overlap, so opacity is applied once, at compositing
-# time, rather than baked into these colors.
+# The route color is expected to be fully opaque. Route/marker drawing works
+# by drawing a connecting line for each path segment, stamping filled
+# squares on top of it for width beyond 1px (see draw_thick_polyline!) --
+# with a semi-transparent color, overlapping stamps would visibly "build up"
+# darker at every overlap, so opacity is applied once, at compositing time,
+# rather than baked into these colors.
 class MosaicRenderer
   attr_reader :canvas, :zoom, :origin_tile_x, :origin_tile_y
 
@@ -43,8 +39,7 @@ class MosaicRenderer
 
     (@origin_tile_y..last_tile_y).each do |ty|
       (@origin_tile_x..last_tile_x).each do |tx|
-        tile_path = @tile_fetcher.fetch(zoom, tx, ty)
-        tile_image = ChunkyPNG::Image.from_file(tile_path)
+        tile_image = @tile_fetcher.fetch_image(zoom, tx, ty)
         @canvas.replace!(tile_image, (tx - @origin_tile_x) * WebMercator::TILE_SIZE,
                           (ty - @origin_tile_y) * WebMercator::TILE_SIZE)
       end
@@ -61,38 +56,44 @@ class MosaicRenderer
     [x, y]
   end
 
+  # Draws a solid connecting line for each segment (a real line-drawing
+  # algorithm, so it's always fully connected -- no gaps, no degenerate
+  # cases) and, for any width beyond a bare 1px line, additionally stamps
+  # filled squares along the path to thicken it. Deliberately a square via
+  # `rect` rather than `circle`: ChunkyPNG's circle algorithm has a
+  # degenerate case at radius 1 (only 4 disconnected corner pixels around an
+  # empty, unfilled center) -- stamping that repeatedly along a path is what
+  # produced a perforated, "dashed" look for a thin (line_width_px: 2)
+  # route; `rect`'s fill has no such small-size edge case.
   def draw_thick_polyline!(canvas, pixel_points, color, width_px)
-    radius = [(width_px / 2.0).round, 1].max
+    half = (width_px / 2.0).floor
     pixel_points.each_cons(2) do |(x0, y0), (x1, y1)|
+      canvas.line(x0.round, y0.round, x1.round, y1.round, color)
+      next if half.zero?
+
       steps = [(x1 - x0).abs.round, (y1 - y0).abs.round, 1].max
       steps.times do |i|
         t = i / steps.to_f
         x = (x0 + ((x1 - x0) * t)).round
         y = (y0 + ((y1 - y0) * t)).round
-        canvas.circle(x, y, radius, color, color)
+        canvas.rect(x - half, y - half, x + half, y + half, color, color)
       end
     end
     last = pixel_points.last
-    canvas.circle(last[0].round, last[1].round, radius, color, color) if last
+    if last && !half.zero?
+      x, y = last[0].round, last[1].round
+      canvas.rect(x - half, y - half, x + half, y + half, color, color)
+    end
     canvas
   end
 
-  # Renders whichever nearby route points fall in this mosaic in
-  # upcoming_color onto a fresh copy of it and returns it -- points outside
-  # the canvas are silently dropped by ChunkyPNG's drawing ops, so passing in
-  # more points than strictly fit is harmless.
-  def base_with_upcoming_route(nearby_pixel_points, color, width_px)
-    base = @canvas.crop(0, 0, @canvas.width, @canvas.height) # non-mutating clone
-    draw_thick_polyline!(base, nearby_pixel_points, color, width_px)
-    base
-  end
-
-  # Given the shared base (from base_with_upcoming_route) and the pixel
-  # points traveled so far (a prefix of nearby_pixel_points), returns a new
-  # canvas with the traveled portion highlighted on top.
-  def with_traveled_route(base, traveled_pixel_points, color, width_px)
-    variant = base.crop(0, 0, base.width, base.height)
-    draw_thick_polyline!(variant, traveled_pixel_points, color, width_px) if traveled_pixel_points.size > 1
+  # Draws the route (in a single color) on a fresh copy of this mosaic and
+  # returns it. pixel_points is typically the whole trip's points -- ones
+  # that land outside this mosaic's bounds are silently dropped by
+  # ChunkyPNG's drawing ops, so there's no need to pre-filter them.
+  def with_route(pixel_points, color, width_px)
+    variant = @canvas.crop(0, 0, @canvas.width, @canvas.height) # non-mutating clone
+    draw_thick_polyline!(variant, pixel_points, color, width_px)
     variant
   end
 end

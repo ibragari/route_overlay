@@ -5,10 +5,10 @@
 # north-up, panning under a fixed center marker) for one dashcam clip, or
 # for every clip in a trip, from the settings in overlay_config.yml.
 #
-# See README-ish comments in lib/*.rb for the mechanics: ffmpeg does all the
-# per-frame compositing (crop panning via a generated sendcmd script, the
-# traveled/upcoming route reveal via a generated concat-demuxer image
-# slideshow); Ruby only prepares those static assets once per render.
+# See README-ish comments in lib/*.rb for the mechanics: Ruby builds one
+# static map image per clip (tiles stitched, route drawn on top once), then
+# ffmpeg does all the per-frame compositing -- panning via a generated
+# sendcmd script driving its crop position, marker rotation the same way.
 
 require "optparse"
 require "fileutils"
@@ -18,8 +18,24 @@ require_relative "lib/gpx_reader"
 require_relative "lib/web_mercator"
 require_relative "lib/tile_fetcher"
 require_relative "lib/mosaic_renderer"
+require_relative "lib/vips_support"
 require_relative "lib/frame_planner"
 require_relative "lib/inset_assets"
+
+# Mosaic building (tile stitching, route drawing, PNG encoding) is by far
+# the hottest path in this script, run hundreds of times per clip -- vips is
+# dramatically faster at it than pure-Ruby chunky_png, so use it whenever
+# it's actually available (see lib/vips_support.rb for what that requires)
+# and silently fall back to the always-available chunky_png-based
+# MosaicRenderer otherwise. Both classes share the same interface.
+if VipsSupport.available?
+  require_relative "lib/vips_mosaic_renderer"
+  MOSAIC_RENDERER_CLASS = VipsMosaicRenderer
+  puts "[mosaic backend] libvips"
+else
+  MOSAIC_RENDERER_CLASS = MosaicRenderer
+  puts "[mosaic backend] chunky_png (pure Ruby, slower -- see lib/vips_support.rb to speed this up)"
+end
 
 def ffprobe_duration_seconds(path)
   out = `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "#{path}"`
@@ -62,23 +78,6 @@ end
 # than fetching genuinely finer tiles -- that would multiply tile-fetch
 # cost with the whole trip's bounding box; this is a one-time local resize.
 FIXED_RADIUS_SUPERSAMPLE = 4
-
-# Every reveal run gets its own small local mosaic (see MosaicRenderer),
-# centered between that run's two GPS points, sized just large enough to
-# contain the pan between them plus the visible radius -- rather than one
-# mosaic sized to the whole clip or trip. This is the safety margin (beyond
-# the visible radius) budgeted for how far apart two *consecutive* GPS fixes
-# could realistically be -- freeGPS records land roughly once a second, and
-# even at a very generous 250 km/h that's under 70m, so this has large
-# headroom for any real dashcam vehicle.
-RUN_LOCAL_MARGIN_METERS = 300
-
-# How many neighboring trackpoints (each side of a run's own two points) to
-# consider when drawing the route inside that run's small local mosaic --
-# generous enough that the line never looks like it starts/stops abruptly at
-# the edge of the visible crop window; points that land outside the mosaic's
-# bounds are simply ignored (see ChunkyPNG::Canvas::Drawing).
-NEARBY_POINT_WINDOW = 40
 
 # Picks the mosaic zoom level and the real-world radius (meters) that the
 # margin around the trip bbox must cover so panning/zooming never runs past
@@ -145,27 +144,31 @@ def zoom_scale_size_px(config, inset_size_px, speed_kmh)
   ((inset_size_px.to_f * config.map.dynamic_speed.max_radius_meters) / radius).round
 end
 
-def write_concat_list(path, runs, variant_paths, fps)
+# ffmpeg's image2 demuxer re-decodes the source file on every single output
+# frame under `-loop 1 -r fps -t duration -i path` -- fine for the tiny
+# marker/mask/border assets, but 30-60x slower than necessary for the much
+# bigger map mosaic (confirmed by isolated timing: 9.7s vs 0.3s for the same
+# 600 frames at our real mosaic size). The concat demuxer decodes a file
+# once and duplicates the already-decoded frame for its `duration` instead,
+# so feed it a single-entry list for the whole clip's length rather than
+# looping the file directly.
+def write_single_image_concat(path, image_path, duration)
   File.open(path, "w") do |f|
-    runs.each do |run|
-      file_path = variant_paths.fetch(run[:reveal_index])
-      f.puts "file '#{file_path.gsub('\\', '/')}'"
-      f.puts "duration #{format('%.6f', run[:frame_count] / fps.to_f)}"
-    end
-    # concat demuxer quirk: the last image's duration is only honored if the
-    # file is listed once more, without a following duration line.
-    last_file = variant_paths.fetch(runs.last[:reveal_index])
-    f.puts "file '#{last_file.gsub('\\', '/')}'"
+    f.puts "file '#{image_path.gsub('\\', '/')}'"
+    f.puts "duration #{format('%.6f', duration)}"
+    # concat demuxer quirk: the last (only) image's duration is only honored
+    # if the file is listed once more, without a following duration line.
+    f.puts "file '#{image_path.gsub('\\', '/')}'"
   end
 end
 
-def write_sendcmd(path, frame_states, mosaics, fps, config, actual_mpp, inset_size_px, supersample, stream_w, stream_h)
+def write_sendcmd(path, frame_states, mosaic, fps, config, actual_mpp, inset_size_px, supersample, stream_w, stream_h)
   dynamic = config.map.window_mode == "dynamic_speed"
   outer_size = dynamic ? [outer_crop_size_px(config, actual_mpp), [stream_w, stream_h].min].min : nil
 
   File.open(path, "w") do |f|
     frame_states.each do |fs|
-      px, py = mosaics.fetch(fs.reveal_index).to_pixel(fs.lon, fs.lat)
+      px, py = mosaic.to_pixel(fs.lon, fs.lat)
       px *= supersample
       py *= supersample
       size = dynamic ? outer_size : crop_size_px(config, actual_mpp, inset_size_px, fs.speed_kmh)
@@ -181,6 +184,18 @@ def write_sendcmd(path, frame_states, mosaics, fps, config, actual_mpp, inset_si
       end
       f.puts "#{t} #{cmds.join(', ')};"
     end
+  end
+end
+
+# variant is a ChunkyPNG::Canvas (MosaicRenderer) or a Vips::Image
+# (VipsMosaicRenderer) depending on which backend is active -- each has its
+# own save API, so dispatch here rather than giving the two renderer
+# classes a fake shared method.
+def save_variant_image(variant, path)
+  if defined?(Vips::Image) && variant.is_a?(Vips::Image)
+    variant.write_to_file(path)
+  else
+    variant.save(path, :fast_rgba)
   end
 end
 
@@ -255,57 +270,46 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
       custom_api_key: config.map.custom_tile_api_key
     )
 
-    # Every reveal run (see FramePlanner.reveal_runs) gets its own small
-    # local mosaic instead of one big mosaic for the whole clip/trip --
-    # sized (in whole tiles) to comfortably contain that run's own pan plus
-    # the visible radius, and identical in pixel size for every run so
-    # ffmpeg's concat demuxer can splice them into one uniform-frame-size
-    # stream (see MosaicRenderer).
-    half_extent_m = max_radius + RUN_LOCAL_MARGIN_METERS
+    # One mosaic covers this whole clip -- big enough (in whole tiles) to
+    # contain every point the clip's own portion of the route touches, plus
+    # the visible pan radius, so panning never runs past its edge. Sized to
+    # the clip, not the whole trip, so a long multi-hour trip doesn't blow
+    # this up the way a single whole-trip mosaic once did.
+    last_idx = trip_points.size - 1
+    clip_lo = main_frame_states.map(&:reveal_index).min
+    clip_hi = [main_frame_states.map(&:reveal_index).max + 1, last_idx].min
+    clip_points = trip_points[clip_lo..clip_hi]
+
+    clip_min_lat = clip_points.map(&:lat).min
+    clip_max_lat = clip_points.map(&:lat).max
+    clip_min_lon = clip_points.map(&:lon).min
+    clip_max_lon = clip_points.map(&:lon).max
+    clip_center_lat = (clip_min_lat + clip_max_lat) / 2.0
+    clip_center_lon = (clip_min_lon + clip_max_lon) / 2.0
+    clip_half_span_m = [
+      (clip_max_lat - clip_min_lat) * 111_320,
+      (clip_max_lon - clip_min_lon) * 111_320 * Math.cos(clip_center_lat * Math::PI / 180.0)
+    ].max / 2.0
+
+    half_extent_m = clip_half_span_m + max_radius + 50 # a little slack beyond the largest window ever shown
     tile_radius = (half_extent_m / (native_mpp * WebMercator::TILE_SIZE)).ceil + 1
     stream_w = (((2 * tile_radius) + 1) * WebMercator::TILE_SIZE) * supersample
     stream_h = stream_w
 
-    last_idx = trip_points.size - 1
-    runs = FramePlanner.reveal_runs(main_frame_states)
+    puts "[#{clip_name}] fetching/stitching map mosaic (#{(2 * tile_radius) + 1}x#{(2 * tile_radius) + 1} tiles) " \
+         "at zoom #{zoom} (#{format('%.2f', actual_mpp)} m/px effective, supersample #{supersample}x)"
+    mosaic_started_at = Time.now
+    mosaic = MOSAIC_RENDERER_CLASS.new(tile_fetcher, zoom: zoom, center_lon: clip_center_lon,
+                                                      center_lat: clip_center_lat, tile_radius: tile_radius)
 
-    puts "[#{clip_name}] fetching/stitching #{runs.size} local mosaic(s) (#{(2 * tile_radius) + 1}x" \
-         "#{(2 * tile_radius) + 1} tiles each) at zoom #{zoom} (#{format('%.2f', actual_mpp)} m/px effective, " \
-         "supersample #{supersample}x)"
-    mosaics = {}
-    variant_paths = {}
-    runs.each do |run|
-      idx = run[:reveal_index]
-      p0 = trip_points[idx]
-      p1 = idx == last_idx ? p0 : trip_points[idx + 1]
-      center_lat = (p0.lat + p1.lat) / 2.0
-      center_lon = (p0.lon + p1.lon) / 2.0
-
-      local_mosaic = MosaicRenderer.new(tile_fetcher, zoom: zoom, center_lon: center_lon, center_lat: center_lat,
-                                                       tile_radius: tile_radius)
-
-      lo = [idx - NEARBY_POINT_WINDOW, 0].max
-      hi = [idx + 1 + NEARBY_POINT_WINDOW, last_idx].min
-      nearby_pixel_points = (lo..hi).map { |i| local_mosaic.to_pixel(trip_points[i].lon, trip_points[i].lat) }
-      traveled_pixel_points = (lo..idx).map { |i| local_mosaic.to_pixel(trip_points[i].lon, trip_points[i].lat) }
-
-      base = local_mosaic.base_with_upcoming_route(nearby_pixel_points, config.route.upcoming_color,
-                                                    config.route.line_width_px)
-      variant = local_mosaic.with_traveled_route(base, traveled_pixel_points, config.route.traveled_color,
-                                                  config.route.line_width_px)
-      path = File.join(work_dir, "variant_#{idx}.png")
-      variant.save(path, :fast_rgba)
-
-      mosaics[idx] = local_mosaic
-      variant_paths[idx] = path
-    end
-    puts "[#{clip_name}] rendered #{variant_paths.size} route-reveal variant(s)"
-
-    concat_path = File.join(work_dir, "concat.txt")
-    write_concat_list(concat_path, runs, variant_paths, fps)
+    all_pixel_points = trip_points.map { |p| mosaic.to_pixel(p.lon, p.lat) }
+    variant = mosaic.with_route(all_pixel_points, config.route.color, config.route.line_width_px)
+    variant_path = File.join(work_dir, "route.png")
+    save_variant_image(variant, variant_path)
+    puts "[#{clip_name}] built map mosaic in #{format('%.1f', Time.now - mosaic_started_at)}s"
 
     sendcmd_path = File.join(work_dir, "sendcmd.txt")
-    write_sendcmd(sendcmd_path, main_frame_states, mosaics, fps, config, actual_mpp, inset_size, supersample, stream_w,
+    write_sendcmd(sendcmd_path, main_frame_states, mosaic, fps, config, actual_mpp, inset_size, supersample, stream_w,
                   stream_h)
 
     shape = config.inset.shape
@@ -323,6 +327,9 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
                               config.position_marker.outline_width_px).save(marker_path, :fast_rgba)
 
     total_duration = main_total_frames / fps.to_f
+    map_concat_path = File.join(work_dir, "map_concat.txt")
+    write_single_image_concat(map_concat_path, variant_path, total_duration)
+
     inset_x, inset_y = corner_offset(config.inset.corner, out_w, out_h, inset_size, config.inset.margin_px)
     center_dx = (inset_x + (inset_size / 2.0)) - (out_w / 2.0)
     center_dy = (inset_y + (inset_size / 2.0)) - (out_h / 2.0)
@@ -331,7 +338,7 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
 
     dynamic = config.map.window_mode == "dynamic_speed"
     f0 = main_frame_states.first
-    px0, py0 = mosaics.fetch(f0.reveal_index).to_pixel(f0.lon, f0.lat)
+    px0, py0 = mosaic.to_pixel(f0.lon, f0.lat)
     px0 *= supersample
     py0 *= supersample
     angle0 = f0.course_deg * Math::PI / 180.0
@@ -389,7 +396,7 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
 
     cmd = [
       "ffmpeg", "-y",
-      "-f", "concat", "-safe", "0", "-i", concat_path,
+      "-f", "concat", "-safe", "0", "-i", map_concat_path,
       "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", marker_path,
       "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", mask_path,
       "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", (config.inset.border.enabled ? border_path : mask_path),
@@ -401,8 +408,11 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
     cmd += main_codec_args
 
     puts "[#{clip_name}] encoding -> #{main_output}"
+    encode_started_at = Time.now
     ok = system(*cmd)
     raise "ffmpeg failed for #{clip_name}" unless ok
+
+    puts "[#{clip_name}] encoded in #{format('%.1f', Time.now - encode_started_at)}s"
   end
 
   if blank_frames.positive?
@@ -439,8 +449,14 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
         end
         ok = system("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_final_path, "-c", "copy", output_target)
         raise "ffmpeg failed joining transparent lead-in for #{clip_name}" unless ok
+
+        # leadin.mov and main.mov are fully superseded by output_target now
+        # that they've been copy-concatenated into it -- keeping them around
+        # would just double the disk space this render uses for no benefit.
+        File.delete(leadin_path, main_output)
       else
         FileUtils.cp(leadin_path, output_target)
+        File.delete(leadin_path)
       end
     end
   end

@@ -43,18 +43,17 @@ run that step yourself first. It then reads that GPX and, per clip (or once
 for the whole trip), renders a small square, transparent video:
 
 - Fetches and stitches OpenStreetMap tiles (or a custom XYZ tile server)
-  covering the trip's bounding box, caching every tile to disk
-  (`lib/tile_fetcher.rb`, `lib/mosaic_renderer.rb`).
-- Draws the full route on it in two tones — muted "upcoming" road ahead,
-  highlighted "traveled" road behind — and pre-renders one image per point
-  where the traveled/upcoming split changes (a "reveal" variant).
+  covering that clip's own portion of the route, caching every tile to disk
+  (`lib/tile_fetcher.rb`, `lib/mosaic_renderer.rb`) — one mosaic per clip,
+  sized to just that clip plus the visible pan radius, not the whole trip
+  (a long trip with many clips would otherwise force one huge, slow mosaic).
+- Draws the whole known route on that mosaic once, in a single color.
 - Works out, frame-by-frame, the car's interpolated position, speed and
   heading between the nearest two GPX points (`lib/frame_planner.rb`).
 - Hands all of that to `ffmpeg`: a generated `sendcmd` script drives
-  per-frame pan (`crop` position) and marker rotation, a generated
-  concat-demuxer list drives the traveled/upcoming reveal, and a small
-  local supersample-then-downscale step keeps the pan smooth instead of
-  visibly snapping between whole map pixels at low speed / tight zoom.
+  per-frame pan (`crop` position) and marker rotation, and a small local
+  supersample-then-downscale step keeps the pan smooth instead of visibly
+  snapping between whole map pixels at low speed / tight zoom.
 - Composites a rotating chevron marker (`lib/inset_assets.rb`) — Google
   Maps-style, always pointing in the current direction of travel — a
   rounded/rect/circle clipping mask, and an optional border ring.
@@ -69,9 +68,16 @@ not hardcoded.
 
 ## Requirements
 
-- Ruby (developed on 3.4, no native gems required — `chunky_png` is pure Ruby)
+- Ruby (developed on 3.4)
 - `ffmpeg` and `ffprobe` on your `PATH`
 - Network access to fetch map tiles the first time (cached locally after that)
+- Map rendering works out of the box with `chunky_png` (pure Ruby, no native
+  gems needed) but is noticeably slower than the optional `libvips`-backed
+  path — see `lib/vips_support.rb`'s comment for how to enable it
+  (`gem install ruby-vips`, plus libvips itself present on the system or its
+  Windows build dropped at `vendor/vips_bin`). Entirely optional: if vips
+  isn't available, this falls back to `chunky_png` automatically and prints
+  which backend it picked.
 
 ## Usage
 
@@ -102,7 +108,8 @@ scripts by their full path instead — but it's what makes step 3 below just
   around the car regardless of speed. Smaller = more zoomed in.
 - `inset.size_px`, `inset.shape`, `inset.border.*` — size and look of the
   rendered square.
-- `route.*`, `position_marker.*` — colors and line/marker width.
+- `route.color`, `route.line_width_px`, `position_marker.*` — route line and
+  marker colors/width.
 - `output.codec` — `prores4444` (alpha video) or `png_sequence`.
 
 **3. `cd` into your trip's clips folder, then render:**
@@ -146,18 +153,31 @@ folder.
 - Config-driven rendering — no hardcoded look/behavior.
 - Inset-only (not full-canvas) alpha video output, ProRes 4444 or PNG
   sequence.
-- Two-tone route reveal (traveled vs. upcoming) that updates per GPS fix.
+- Single-color route line, drawn once per clip onto a mosaic sized to that
+  clip's own portion of the trip (not the whole trip) plus the visible pan
+  radius — kept simple and fast on purpose; see "What's not done yet" for
+  the two-tone traveled/upcoming reveal this replaced.
 - Rotating chevron position marker matching the GPX-derived compass course.
 - North-up map orientation with smooth, sub-pixel-accurate panning
   (no visible per-second "jump" between map positions).
 - `fixed_radius` (constant real-world zoom) and `fixed_zoom` (constant tile
   zoom level) window modes.
-- OSM and custom XYZ tile server support, with on-disk tile caching.
+- OSM and custom XYZ tile server support, with on-disk tile caching, plus an
+  in-memory decoded-tile cache so a clip's many overlapping tile reads don't
+  each re-decode the same PNG from scratch.
+- Optional `libvips`-backed rendering (`lib/vips_support.rb`,
+  `lib/vips_mosaic_renderer.rb`) for meaningfully faster mosaic building,
+  with automatic fallback to the always-available `chunky_png` path.
 - Leading frames before the trip's very first GPS fix (e.g. a clip recorded
   before the GPS chip locked) render as fully transparent instead of a
   frozen marker, keeping the overlay's length matched to the source clip.
 - A clip with no usable GPS at all renders as a fully transparent clip
   instead of crashing the whole batch.
+- Intermediate per-clip render files (map mosaic, sendcmd script, mask/
+  border/marker assets) live under `overlays/work/<clip>/` and are small;
+  the one genuinely large intermediate (`main.mov`, produced only for a
+  clip with leading transparent frames) is deleted automatically once it's
+  been merged into the final output.
 - `--nframes` flag for fast iteration while tuning config.
 
 ## What's not done yet
@@ -173,8 +193,12 @@ folder.
   code reading or rendering it yet.
 - **`extras` (`north_arrow`, `scale_bar`, `timestamp`)** — listed as config
   options but not implemented.
-- **`route.style: single_color`** — only the two-tone style is implemented;
-  the config option is read nowhere.
+- **Two-tone route (traveled vs. upcoming)** — this project had it working
+  at one point (one small local mosaic per GPS point reached), but it was
+  the direct cause of the worst performance problems encountered building
+  this, and was deliberately dropped in favor of one single-color route
+  drawn once per clip. Could come back as an opt-in `route.style` later,
+  but isn't planned for now.
 - **Trailing no-GPS frames** (a clip ending after the trip's last GPS fix)
   still freeze the marker at the last known position, unlike the leading
   case above — not requested/changed yet.
