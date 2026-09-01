@@ -34,7 +34,13 @@ map:
   dynamic_speed:
     min_radius_meters: 150      # radius shown while stopped / moving slowly
     max_radius_meters: 600      # radius shown at or above max_speed_kmh
-    max_speed_kmh: 80           # speed at which max_radius_meters is reached; scales linearly below this
+    min_speed_kmh: 10           # radius stays at min_radius_meters at or below this speed (a "dead zone" before
+                                 # zooming out starts); 0 disables, matching max_speed_kmh's own zero point
+    max_speed_kmh: 80           # speed at which max_radius_meters is reached; scales below this per curve_exponent
+    curve_exponent: 1           # reshapes how radius ramps from min_radius_meters to max_radius_meters across
+                                 # min_speed_kmh..max_speed_kmh: 1 (default) is a straight line; >1 keeps the radius
+                                 # close to min_radius_meters through low/mid speeds and only grows quickly near
+                                 # max_speed_kmh; <1 grows fast early and flattens out later
     speed_smoothing_seconds: 4  # total width (seconds, >=0) of the centered time window averaged around each
                                  # point before mapping speed to zoom radius, to avoid frame-to-frame jitter from
                                  # noisy raw GPS speed and to smooth across clip boundaries; 0 disables. Wider =

@@ -162,7 +162,15 @@ end
 # Real-world radius (meters) to show for the current speed, in dynamic_speed mode.
 def current_radius_meters(config, speed_kmh)
   d = config.map.dynamic_speed
-  t = (speed_kmh / d.max_speed_kmh.to_f).clamp(0.0, 1.0)
+  min_speed = (d.min_speed_kmh || 0).to_f
+  span = [d.max_speed_kmh.to_f - min_speed, 0.0001].max # guard against max_speed_kmh <= min_speed_kmh
+  t = ((speed_kmh - min_speed) / span).clamp(0.0, 1.0)
+  # curve_exponent reshapes how t ramps from 0 to 1 across that speed range
+  # -- 1.0 (default) is a straight line, same as before this was added; >1
+  # keeps the radius close to min_radius_meters through low/mid speeds and
+  # only grows quickly near max_speed_kmh (an "ease-in" curve); <1 does the
+  # opposite (grows fast early, flattens out later).
+  t **= (d.curve_exponent || 1.0)
   d.min_radius_meters + ((d.max_radius_meters - d.min_radius_meters) * t)
 end
 

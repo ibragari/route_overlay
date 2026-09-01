@@ -140,11 +140,17 @@ Then edit `overlay_config.yml` (in this folder, applies to every trip):
   around the car regardless of speed. Smaller = more zoomed in.
 - `map.window_mode: dynamic_speed` — an alternative mode where the radius
   scales with current speed instead of staying constant: `min_radius_meters`
-  is shown while stopped, `max_radius_meters` once speed reaches
-  `max_speed_kmh` (capped there, doesn't zoom out further above it), linearly
-  interpolated in between (e.g. halfway to `max_speed_kmh` shows a radius
-  halfway between the two). Before that speed-to-radius mapping is applied,
-  speed is smoothed by averaging it over a *centered* real-time window
+  is shown at or below `min_speed_kmh` (a "dead zone" before zooming out
+  starts — `0` disables it, same as leaving `min_speed_kmh` unset), ramping
+  up to `max_radius_meters` once speed reaches `max_speed_kmh` (capped
+  there, doesn't zoom out further above it). `curve_exponent` shapes that
+  ramp: `1` (the default) is a straight line; higher values keep the radius
+  close to `min_radius_meters` through low/mid speeds and only grow it
+  quickly near `max_speed_kmh` (useful if, e.g., the radius otherwise feels
+  too large already at ordinary city speeds); values below `1` do the
+  opposite, growing fast early and flattening out later. Before that
+  speed-to-radius mapping is applied, speed is smoothed by averaging it
+  over a *centered* real-time window
   around each moment — `speed_smoothing_seconds` sets that window's total
   width (e.g. `4` averages ±2s around each point) — so the zoom doesn't
   jitter on noisy raw GPS speed and can start widening/narrowing slightly
