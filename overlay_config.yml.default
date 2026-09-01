@@ -20,7 +20,8 @@ map:
   custom_tile_url_template: ""  # only used when tile_provider: custom, e.g. "https://.../{z}/{x}/{y}.png"
   custom_tile_api_key: ""       # only used when tile_provider: custom, if the provider needs one
   tile_cache_dir: ./tile_cache
-  rotation_mode: north_up       # north_up | heading_up
+  # rotation_mode: north_up     # north_up | heading_up -- INERT: not read by any code yet (map is always
+                                 # rendered north-up); heading_up isn't implemented. See README's "What's not done yet".
 
   window_mode: fixed_radius     # fixed_radius | fixed_zoom | dynamic_speed -- only the matching block below is used
 
@@ -62,9 +63,9 @@ position_marker:
   outline_color: "#000000"
   outline_width_px: 2
 
-speed_hud:
-  enabled: false                # left off for now, per your call -- flip to true to enable later
-  position: attached            # attached | separate_corner
-  unit: kmh                     # matches gps_extractor.rb's GPX <speed> unit
+# speed_hud:                    # NOT IMPLEMENTED YET -- no code reads or renders this section at all.
+#   enabled: false
+#   position: attached           # attached | separate_corner
+#   unit: kmh                    # matches gps_extractor.rb's GPX <speed> unit
 
-extras: []                       # zero or more of: north_arrow, scale_bar, timestamp
+# extras: []                     # NOT IMPLEMENTED YET -- north_arrow, scale_bar, timestamp are not rendered.
