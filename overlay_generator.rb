@@ -55,36 +55,52 @@ end
 # overlay_generator.rb <clip>` subprocesses (each gets its own interpreter
 # and GIL -- genuine OS-level parallelism, not GIL-limited threading) and
 # reusing the existing single-explicit-clip code path rather than
-# duplicating render_clip's logic. Keeps up to max_parallel running at
-# once, refilling as each finishes (Process.wait2, not a fixed-size batch,
-# so a slow clip doesn't stall faster ones queued behind it). Inherits this
-# process's working directory (Process.spawn's default), matching run_dir;
-# config_path is passed explicitly so every subprocess reads the exact same
+# duplicating render_clip's logic. Inherits this process's working
+# directory (Process.spawn's default), matching run_dir; config_path is
+# passed explicitly so every subprocess reads the exact same
 # (already-resolved, absolute) config the parent did, regardless of how the
 # parent was invoked.
+#
+# One Ruby Thread per pool slot, each looping "pop a clip, spawn it, wait
+# specifically for THAT pid" -- not a single loop doing Process.wait2 with
+# no pid (wait for *any* child) and looking up which clip a hash says that
+# pid belongs to. The latter is what this used to do, and on a real
+# multi-hour, 14-clip run it produced a wrong result: two clips that had
+# just printed their own successful "done:" line were still reported
+# failed in the final summary, meaning pid attribution came out wrong
+# somewhere -- never pinned down exactly where (two different faithful
+# reproductions of that pattern, including one where each worker also
+# spawns its own grandchild via IO.popen like encode_dynamic_speed_main
+# does, ran correctly every time). Rather than ship a fix for a guessed
+# cause, this sidesteps the whole mechanism: each thread only ever calls
+# Process.wait2(pid) for the exact pid it just spawned itself, so there is
+# no shared table to mis-attribute a result through, regardless of what the
+# original bug actually was. Queue#pop(true) (non-blocking) is what lets
+# each thread pull its own next clip without a mutex-guarded index.
 def run_clips_in_parallel(clip_paths, config_path, nframes, max_parallel)
   ruby_script = File.expand_path(__FILE__)
-  pending = clip_paths.dup
-  running = {}
-
-  spawn_next = lambda do
-    next if pending.empty?
-
-    clip_path = pending.shift
-    cmd = ["ruby", ruby_script, clip_path, "--config", config_path]
-    cmd += ["--nframes", nframes.to_s] if nframes
-    running[Process.spawn(*cmd)] = clip_path
-  end
-
-  [max_parallel, clip_paths.size].min.times { spawn_next.call }
-
+  queue = Queue.new
+  clip_paths.each { |clip_path| queue << clip_path }
+  mutex = Mutex.new
   failures = []
-  until running.empty?
-    pid, status = Process.wait2
-    clip_path = running.delete(pid)
-    failures << clip_path unless status.success?
-    spawn_next.call
+
+  workers = [max_parallel, clip_paths.size].min.times.map do
+    Thread.new do
+      loop do
+        clip_path = begin
+          queue.pop(true)
+        rescue ThreadError
+          break
+        end
+        cmd = ["ruby", ruby_script, clip_path, "--config", config_path]
+        cmd += ["--nframes", nframes.to_s] if nframes
+        pid = Process.spawn(*cmd)
+        _, status = Process.wait2(pid)
+        mutex.synchronize { failures << clip_path unless status.success? }
+      end
+    end
   end
+  workers.each(&:join)
 
   raise "Parallel render failed for: #{failures.join(', ')}" unless failures.empty?
 end
