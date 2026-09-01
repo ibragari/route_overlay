@@ -315,18 +315,39 @@ def write_sendcmd(path, frame_states, mosaic, fps, config, actual_mpp, inset_siz
   end
 end
 
+# dynamic_speed only: builds a mipmap pyramid from the materialized mosaic
+# (level 0 = full native resolution, each next level shrunk by half),
+# stopping once a level's width would drop below inset_size. Sampling a
+# large real-world crop directly from the full-res mosaic scales badly with
+# crop size -- measured up to ~18x slower for a crop near the mosaic's full
+# size vs. a small one (49.93ms/frame vs 2.85ms/frame at a real trip's
+# mosaic scale), almost certainly cache effects: each output pixel's
+# bilinear sample lands on a widely-scattered, cold address in a huge
+# buffer when heavily downsampling. Picking the smallest mip level that
+# still lets a frame's crop downsample (never upsample -- see
+# render_dynamic_frame) keeps every frame sampling from a buffer close in
+# size to what it actually needs, flattening per-frame cost to ~3ms
+# regardless of crop size (measured) -- the one-time cost of building the
+# pyramid (a handful of shrink calls, ~1.5s at that same scale) is trivial
+# against that over a clip's thousands of frames.
+def build_mip_pyramid(materialized, inset_size)
+  mips = [materialized]
+  mips << mips.last.shrink(2, 2).copy_memory while mips.last.width / 2 >= inset_size
+  mips
+end
+
 # dynamic_speed only: renders one inset_size x inset_size RGBA raw frame
 # (ready for ffmpeg's rawvideo stdin) for a single frame state, by cropping
-# variant (the route-drawn, NATIVE-resolution Vips::Image mosaic -- no
-# supersampling needed here, see desired_supersample's comment) to the
-# exact real-world radius fs.dynamic_radius_m around (fs.lon, fs.lat), then
-# resizing that window down to exactly inset_size x inset_size, in a single
-# `affine` call with an explicit oarea (rather than extract_area+affine+
-# extract_area+thumbnail_image, which was measured to be catastrophically
-# slower -- ~48ms/frame vs ~1-2ms/frame -- almost certainly because it
-# builds and evaluates a full native-resolution intermediate region on
-# every frame before downsampling, instead of letting vips compute only the
-# inset_size x inset_size output pixels it actually needs).
+# the mip level (see build_mip_pyramid) closest in resolution to what this
+# frame's real-world radius fs.dynamic_radius_m actually needs around
+# (fs.lon, fs.lat), then resizing that window down to exactly inset_size x
+# inset_size, in a single `affine` call with an explicit oarea (rather than
+# extract_area+affine+extract_area+thumbnail_image, which was measured to
+# be catastrophically slower -- ~48ms/frame vs ~1-2ms/frame at a small crop
+# -- almost certainly because it builds and evaluates a full-resolution
+# intermediate region on every frame before downsampling, instead of
+# letting vips compute only the inset_size x inset_size output pixels it
+# actually needs).
 #
 # Sub-pixel accuracy (the reason PAN_SUPERSAMPLE exists for the ffmpeg-side
 # mechanism fixed_radius/fixed_zoom still use) comes from vips' `affine`
@@ -338,15 +359,25 @@ end
 # plan this was built from): matrix entries are 1/scale (not scale), and
 # odx/ody are -x0f/scale (not -x0f), i.e. everything is expressed in
 # *output*-relative terms, not source-relative terms.
-def render_dynamic_frame(variant, mosaic, native_mpp, inset_size, fs, bilinear)
+def render_dynamic_frame(mips, mosaic, native_mpp, inset_size, fs, bilinear)
   cx, cy = mosaic.to_pixel(fs.lon, fs.lat)
   size_f = (2.0 * fs.dynamic_radius_m) / native_mpp
-  size_f = [size_f, variant.width, variant.height].min # never request a window bigger than the mosaic
+  size_f = [size_f, mips.first.width, mips.first.height].min # never request a window bigger than the mosaic
 
-  x0f = (cx - (size_f / 2.0)).clamp(0.0, variant.width - size_f)
-  y0f = (cy - (size_f / 2.0)).clamp(0.0, variant.height - size_f)
+  # Coarsest mip level whose native resolution still lets this frame's crop
+  # downsample into inset_size, never upsample (which would blur/look
+  # wrong) -- level 0 (full res) is always a safe fallback for a crop
+  # that's already tight (e.g. near min_radius_meters).
+  level = 0
+  mips.each_index { |i| level = i if (size_f / (2**i)) >= inset_size }
+  variant = mips[level]
+  scale = 2**level
+  mcx, mcy, msize = cx / scale, cy / scale, size_f / scale
 
-  inv_scale = inset_size / size_f
+  x0f = (mcx - (msize / 2.0)).clamp(0.0, variant.width - msize)
+  y0f = (mcy - (msize / 2.0)).clamp(0.0, variant.height - msize)
+
+  inv_scale = inset_size / msize
   frame = variant.affine([inv_scale, 0, 0, inv_scale], odx: -x0f * inv_scale, ody: -y0f * inv_scale,
                           interpolate: bilinear, oarea: [0, 0, inset_size, inset_size], background: [0, 0, 0, 0])
   frame = frame.bandjoin(255) if frame.bands == 3 # defensive -- variant is 4-band RGBA throughout this codebase
@@ -450,10 +481,11 @@ def encode_dynamic_speed_main(config, clip_name, work_dir, variant, mosaic, nati
   # real in-memory buffer, so every subsequent per-frame crop is a cheap
   # random-access read.
   materialized = variant.copy_memory
+  mips = build_mip_pyramid(materialized, inset_size)
   bilinear = Vips::Interpolate.new("bilinear")
   io = IO.popen(cmd, "wb")
   begin
-    main_frame_states.each { |fs| io.write(render_dynamic_frame(materialized, mosaic, native_mpp, inset_size, fs, bilinear)) }
+    main_frame_states.each { |fs| io.write(render_dynamic_frame(mips, mosaic, native_mpp, inset_size, fs, bilinear)) }
   rescue Errno::EPIPE
     puts "[#{clip_name}] ffmpeg closed its input early (broken pipe) -- checking exit status"
   ensure

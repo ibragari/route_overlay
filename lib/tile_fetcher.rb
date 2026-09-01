@@ -3,6 +3,7 @@
 require "net/http"
 require "uri"
 require "fileutils"
+require_relative "web_mercator"
 
 # Fetches OSM (or a custom XYZ) tile server, caching every tile to disk so
 # it is only ever downloaded once across repeated runs (including --nframes
@@ -84,9 +85,24 @@ class TileFetcher
     request["User-Agent"] = USER_AGENT
 
     response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https") { |http| http.request(request) }
+    # A 404 for one specific tile means the provider genuinely has no data
+    # there -- confirmed a real, permanent gap (not a transient error): at
+    # high zoom, a tile can 404 even though its lower-zoom parent exists.
+    # That's a content-level response, not a fetch failure, so it shouldn't
+    # abort the whole render -- cache a transparent placeholder instead, so
+    # the mosaic just has a blank patch there and this permanently-missing
+    # tile isn't re-requested on every future run. Any other non-success
+    # status (5xx, network trouble, etc.) still raises as before -- those
+    # aren't "no data here", they're something actually wrong.
+    return blank_tile_png if response.is_a?(Net::HTTPNotFound)
     raise "Tile fetch failed (#{response.code}) for #{uri}" unless response.is_a?(Net::HTTPSuccess)
 
     response.body
+  end
+
+  def blank_tile_png
+    @blank_tile_png ||= Vips::Image.black(WebMercator::TILE_SIZE, WebMercator::TILE_SIZE, bands: 4)
+                                    .cast(:uchar).write_to_buffer(".png")
   end
 
   def throttle!
