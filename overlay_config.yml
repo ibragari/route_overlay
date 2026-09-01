@@ -25,7 +25,7 @@ map:
   window_mode: fixed_radius     # fixed_radius | fixed_zoom | dynamic_speed -- only the matching block below is used
 
   fixed_radius:
-    radius_meters: 150          # constant real-world radius shown around current position, regardless of speed
+    radius_meters: 200          # constant real-world radius shown around current position, regardless of speed
 
   fixed_zoom:
     zoom_level: 16               # constant OSM tile zoom level -- felt scale then depends on inset size_px
@@ -49,17 +49,21 @@ inset:
 route:
   color: "#FF3B30"              # must be fully opaque (no alpha) -- see mosaic_renderer.rb's draw_thick_polyline!
   line_width_px: 2
-  privacy_zones: []             # zero or more circles the route line is never drawn inside (e.g. hide it near home) --
+  privacy_zones:                # zero or more circles the route line is never drawn inside (e.g. hide it near home) --
                                  # the line stops before entering one and resumes after leaving it, e.g.:
                                  # - center_lat: 47.123456
                                  #   center_lon: 28.123456
                                  #   radius_meters: 200
+    - center_lat: 90.0
+      center_lon: 0.0
+      radius_meters: 125
+
 
 position_marker:
   enabled: true
   color: "#1A73E8"
-  radius_px: 8
-  outline_color: "#FFFFFFFF"
+  radius_px: 14
+  outline_color: "#000000"
   outline_width_px: 2
 
 speed_hud:

@@ -33,6 +33,19 @@ course (degrees) written as GPX `<extensions>`. You can run it by hand (e.g.
 to pass `--utc-offset`, or to point at a differently-named GPX), but you
 don't have to — see the next section.
 
+Some clips carry `freeGPS` records stamped **before** the GPS chip has ever
+locked (`active` flag `'V'` instead of `'A'`) — usually just the first
+second or two of a trip's very first clip. Occasionally the camera's RTC
+hasn't synced yet at that point either, so those pre-lock records carry a
+stale/bogus timestamp (observed: off by a fixed ~3 hours, corrected the
+instant the first real fix comes in) instead of a merely-imprecise one.
+`NovatekGps.clip_time_range` (used to work out a clip's true start time —
+see below) detects this as a >10 minute jump between consecutive record
+timestamps within the same file and discards everything before the jump,
+so it never anchors a clip to the wrong clock. This is self-contained to
+each file's own embedded records — it doesn't rely on filenames or any
+other clock.
+
 ### 2. Overlay rendering — `overlay_generator.rb` + `lib/*`
 
 `overlay_generator.rb` first makes sure `trip.gpx_file` exists and is at
@@ -68,7 +81,15 @@ not hardcoded.
 
 ## Requirements
 
-- Ruby (developed on 3.4)
+- Ruby (developed on 3.4). On Windows, install with winget:
+  ```
+  winget install RubyInstallerTeam.RubyWithDevKit.3.4
+  ```
+  (the `WithDevKit` variant includes the MSYS2/gcc toolchain — not needed
+  for the project itself, but required if you want the optional `libvips`
+  acceleration below, so it's easiest to grab it up front rather than come
+  back for it later). Open a *new* terminal afterward and confirm it worked
+  with `ruby -v`.
 - `ffmpeg` and `ffprobe` on your `PATH`
 - Network access to fetch map tiles the first time (cached locally after that)
 - Map rendering works out of the box with `chunky_png` (pure Ruby, no native
@@ -177,6 +198,10 @@ folder.
 - Leading frames before the trip's very first GPS fix (e.g. a clip recorded
   before the GPS chip locked) render as fully transparent instead of a
   frozen marker, keeping the overlay's length matched to the source clip.
+- A clip whose pre-lock records carry a stale/bogus RTC timestamp (seen as
+  a multi-hour jump right before the first real fix) no longer gets
+  anchored to the wrong clock and rendered fully blank — see "Extraction"
+  above.
 - A clip with no usable GPS at all renders as a fully transparent clip
   instead of crashing the whole batch.
 - Intermediate per-clip render files (map mosaic, sendcmd script, mask/

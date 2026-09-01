@@ -36,6 +36,15 @@ module NovatekGps
   CHUNK_SIZE = 4 * 1024 * 1024
   KNOTS_TO_KMH = 1.852
 
+  # Some boots leave the camera's RTC holding a stale/bogus value until GPS
+  # produces its first fix and corrects it -- seen as void ('V') records at
+  # the very start of a clip whose timestamp is off by hours from every
+  # record after it, even though those void records are internally
+  # consistent with *each other* (normal encoder-placement gaps between them
+  # are at most tens of seconds). A jump this large can only be that RTC
+  # correction, never a real gap between consecutive freeGPS records.
+  CLOCK_JUMP_SECONDS = 600
+
   Trackpoint = Struct.new(:time, :lat, :lon, :speed_kmh, :course, keyword_init: true)
 
   module_function
@@ -152,7 +161,11 @@ module NovatekGps
 
     each_record(path, include_void: true) do |tp|
       t = tp.time - utc_offset_hours * 3600
-      first_time ||= t
+      # A jump this large means the RTC just got corrected (see
+      # CLOCK_JUMP_SECONDS) -- records before it are on a different, bogus
+      # time base, so restart the range from here instead of anchoring to
+      # them.
+      first_time = t if first_time.nil? || (t - last_time).abs > CLOCK_JUMP_SECONDS
       last_time = t
     end
 
