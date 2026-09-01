@@ -2,6 +2,11 @@
 /tile_cache/
 trip.gpx
 
+# Your personal settings -- copy overlay_config.yml.default to this filename
+# once and edit it; kept out of git since it can end up holding real
+# locations (route.privacy_zones) or other per-user preferences.
+/overlay_config.yml
+
 # Rendered overlay output (final renders + intermediate work files)
 /overlays/
 /overlays_test/

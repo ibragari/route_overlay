@@ -49,15 +49,11 @@ inset:
 route:
   color: "#FF3B30"              # must be fully opaque (no alpha) -- see mosaic_renderer.rb's draw_thick_polyline!
   line_width_px: 2
-  privacy_zones:                # zero or more circles the route line is never drawn inside (e.g. hide it near home) --
+  privacy_zones: []             # zero or more circles the route line is never drawn inside (e.g. hide it near home) --
                                  # the line stops before entering one and resumes after leaving it, e.g.:
                                  # - center_lat: 47.123456
                                  #   center_lon: 28.123456
                                  #   radius_meters: 200
-    - center_lat: 90.0
-      center_lon: 0.0
-      radius_meters: 125
-
 
 position_marker:
   enabled: true

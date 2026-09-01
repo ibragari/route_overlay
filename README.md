@@ -118,7 +118,17 @@ for that to take effect. This isn't required — you can always invoke the
 scripts by their full path instead — but it's what makes step 3 below just
 `routeoverlay` instead of `ruby "D:\...\route_overlay\overlay_generator.rb"`.
 
-**2. Edit `overlay_config.yml`** (in this folder, applies to every trip):
+**2. Create your settings file, then edit it:**
+
+`overlay_config.yml` itself isn't tracked in git (it's your personal copy,
+and can end up holding real locations via `route.privacy_zones`). The repo
+ships `overlay_config.yml.default` as a template — copy it once:
+
+```
+copy overlay_config.yml.default overlay_config.yml
+```
+
+Then edit `overlay_config.yml` (in this folder, applies to every trip):
 
 - `trip.clips_dir` — leave as `.` to mean "the folder I'm running this
   from"; `trip.utc_offset_hours` — your camera clock's UTC offset (0 if
