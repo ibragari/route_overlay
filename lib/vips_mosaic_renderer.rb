@@ -60,11 +60,31 @@ class VipsMosaicRenderer
   # covers the whole trip's points; ones outside this mosaic's bounds are
   # silently dropped by vips' drawing ops, so there's no need to pre-filter
   # for that.
-  def with_route(pixel_point_runs, color, width_px)
-    pixel_point_runs.reduce(@canvas) { |canvas, points| draw_thick_polyline(canvas, points, color, width_px) }
+  #
+  # alpha (route.track_line_alpha, 0.0-1.0) is applied to the whole route at
+  # once: below 1.0, the route is drawn fully opaque onto a separate
+  # transparent layer first, that layer's alpha is scaled uniformly, and
+  # only then is it composited onto the mosaic -- not by drawing with a
+  # semi-transparent color directly, which would visibly "build up" darker
+  # wherever the line/rect stamps in draw_thick_polyline overlap.
+  def with_route(pixel_point_runs, color, width_px, alpha = 1.0)
+    if alpha >= 1.0
+      return pixel_point_runs.reduce(@canvas) { |canvas, points| draw_thick_polyline(canvas, points, color, width_px) }
+    end
+
+    blank = Vips::Image.black(@canvas.width, @canvas.height, bands: 4).cast(:uchar)
+    route_layer = pixel_point_runs.reduce(blank) { |canvas, points| draw_thick_polyline(canvas, points, color, width_px) }
+    route_layer = scale_alpha(route_layer, alpha)
+    @canvas.copy(interpretation: :srgb).composite(route_layer.copy(interpretation: :srgb), :over)
   end
 
   private
+
+  def scale_alpha(image, alpha)
+    rgb = image.extract_band(0, n: image.bands - 1)
+    a = (image.extract_band(image.bands - 1) * alpha).cast(:uchar)
+    rgb.bandjoin(a)
+  end
 
   def draw_thick_polyline(canvas, pixel_points, color, width_px)
     half = (width_px / 2.0).floor

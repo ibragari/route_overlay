@@ -141,6 +141,8 @@ Then edit `overlay_config.yml` (in this folder, applies to every trip):
   rendered square.
 - `route.color`, `route.line_width_px`, `position_marker.*` — route line and
   marker colors/width.
+- `route.track_line_alpha` — route line opacity, `0.0` (invisible) to `1.0`
+  (fully opaque, the default).
 - `route.privacy_zones` — zero or more `{center_lat, center_lon,
   radius_meters}` circles the route line is never drawn inside (e.g. to hide
   it near home) — the line stops before entering one and resumes after.
@@ -194,6 +196,9 @@ folder.
 - `route.privacy_zones`: circular no-draw zones for the route line (e.g. to
   hide it near home) — the line stops before a zone and resumes after,
   rather than being drawn through it or jumping straight across the gap.
+- `route.track_line_alpha`: translucent route line, applied once to the
+  whole assembled line rather than baked into the draw color, so overlapping
+  segment stamps don't double-blend and build up darker.
 - Rotating chevron position marker matching the GPX-derived compass course.
 - North-up map orientation with smooth, sub-pixel-accurate panning
   (no visible per-second "jump" between map positions).

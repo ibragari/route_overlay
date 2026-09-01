@@ -335,7 +335,8 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
     pixel_point_runs = route_runs(trip_points, config.route.privacy_zones || []).map do |run|
       run.map { |p| mosaic.to_pixel(p.lon, p.lat) }
     end
-    variant = mosaic.with_route(pixel_point_runs, config.route.color, config.route.line_width_px)
+    variant = mosaic.with_route(pixel_point_runs, config.route.color, config.route.line_width_px,
+                                 config.route.track_line_alpha || 1.0)
     variant_path = File.join(work_dir, "route.png")
     save_variant_image(variant, variant_path)
     puts "[#{clip_name}] built map mosaic in #{format('%.1f', Time.now - mosaic_started_at)}s"

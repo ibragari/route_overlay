@@ -96,9 +96,35 @@ class MosaicRenderer
   # covers the whole trip's points -- ones that land outside this mosaic's
   # bounds are silently dropped by ChunkyPNG's drawing ops, so there's no
   # need to pre-filter for that.
-  def with_route(pixel_point_runs, color, width_px)
+  #
+  # alpha (route.track_line_alpha, 0.0-1.0) is applied to the whole route at
+  # once: below 1.0, the route is drawn fully opaque onto a separate
+  # transparent layer first, that layer's alpha is scaled uniformly, and
+  # only then is it composited onto the mosaic -- not by drawing with a
+  # semi-transparent color directly, which would visibly "build up" darker
+  # wherever the line/rect stamps in draw_thick_polyline! overlap.
+  def with_route(pixel_point_runs, color, width_px, alpha = 1.0)
     variant = @canvas.crop(0, 0, @canvas.width, @canvas.height) # non-mutating clone
-    pixel_point_runs.each { |points| draw_thick_polyline!(variant, points, color, width_px) }
+    if alpha >= 1.0
+      pixel_point_runs.each { |points| draw_thick_polyline!(variant, points, color, width_px) }
+      return variant
+    end
+
+    route_layer = ChunkyPNG::Canvas.new(@canvas.width, @canvas.height, ChunkyPNG::Color::TRANSPARENT)
+    pixel_point_runs.each { |points| draw_thick_polyline!(route_layer, points, color, width_px) }
+    scale_alpha!(route_layer, alpha)
+    variant.compose!(route_layer)
     variant
+  end
+
+  private
+
+  def scale_alpha!(canvas, alpha)
+    canvas.pixels.map! do |pixel|
+      a = pixel & 0xff
+      next pixel if a.zero?
+
+      (pixel & 0xffffff00) | (a * alpha).round
+    end
   end
 end
