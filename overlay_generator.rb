@@ -384,10 +384,21 @@ def render_dynamic_frame(mips, mosaic, native_mpp, inset_size, fs, bilinear)
   # downsample into inset_size, never upsample (which would blur/look
   # wrong) -- level 0 (full res) is always a safe fallback for a crop
   # that's already tight (e.g. near min_radius_meters).
+  #
+  # scale is each level's ACTUAL measured width ratio to level 0, not an
+  # assumed 2**level -- vips' shrink(2,2) rounds down on an odd dimension
+  # (confirmed: a real 4483px mosaic produced 2242, 1121, not the assumed
+  # 2241.5->2242, 1120.5->1121 exactly, and that rounding compounds across
+  # levels), which happened not to show up in this feature's own
+  # verification because that used a mosaic dimension (14080) that halves
+  # exactly five times in a row. Real drift measured against an actual
+  # 4483px mosaic was tiny (~0.02% crop misplacement) -- not the cause of
+  # any reported bug, just a correctness fix worth making since the real
+  # per-level size is cheap to use instead of assuming one.
   level = 0
-  mips.each_index { |i| level = i if (size_f / (2**i)) >= inset_size }
+  mips.each_index { |i| level = i if (size_f / (mips.first.width.to_f / mips[i].width)) >= inset_size }
   variant = mips[level]
-  scale = 2**level
+  scale = mips.first.width.to_f / variant.width
   mcx, mcy, msize = cx / scale, cy / scale, size_f / scale
 
   x0f = (mcx - (msize / 2.0)).clamp(0.0, variant.width - msize)

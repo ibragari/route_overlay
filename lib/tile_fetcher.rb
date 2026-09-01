@@ -89,15 +89,37 @@ class TileFetcher
     # there -- confirmed a real, permanent gap (not a transient error): at
     # high zoom, a tile can 404 even though its lower-zoom parent exists.
     # That's a content-level response, not a fetch failure, so it shouldn't
-    # abort the whole render -- cache a transparent placeholder instead, so
-    # the mosaic just has a blank patch there and this permanently-missing
-    # tile isn't re-requested on every future run. Any other non-success
-    # status (5xx, network trouble, etc.) still raises as before -- those
-    # aren't "no data here", they're something actually wrong.
-    return blank_tile_png if response.is_a?(Net::HTTPNotFound)
+    # abort the whole render -- but leaving it fully blank turned out to be
+    # a real visual problem in practice: at a deep zoom, missing tiles
+    # cluster (a whole area a renderer skipped, not one random gap), so a
+    # clip whose crop window happens to overlap that cluster showed a large
+    # blank patch instead of a small one. Falling back to the tile's parent
+    # (see fallback_from_parent) -- cropping the matching quadrant and
+    # upscaling it 2x -- is what every serious map client does for exactly
+    # this case, and gives real (just lower-resolution) content instead of
+    # nothing. Any other non-success status (5xx, network trouble, etc.)
+    # still raises as before -- those aren't "no data here", they're
+    # something actually wrong.
+    return fallback_from_parent(zoom, x, y) if response.is_a?(Net::HTTPNotFound)
     raise "Tile fetch failed (#{response.code}) for #{uri}" unless response.is_a?(Net::HTTPSuccess)
 
     response.body
+  end
+
+  # zoom 0 has no parent to fall back to -- true dead end, use a transparent
+  # placeholder. Otherwise fetch(...) on the parent (zoom-1, x/2, y/2) --
+  # itself falling back further if THAT'S missing too, so a whole cluster of
+  # missing zoom levels still bottoms out on real content eventually -- then
+  # crop the quarter of it this tile corresponds to and scale that back up
+  # to a full TILE_SIZE tile.
+  def fallback_from_parent(zoom, x, y)
+    return blank_tile_png if zoom.zero?
+
+    parent_path = fetch(zoom - 1, x / 2, y / 2)
+    parent = Vips::Image.new_from_file(parent_path)
+    half = WebMercator::TILE_SIZE / 2
+    quadrant = parent.extract_area((x % 2) * half, (y % 2) * half, half, half)
+    quadrant.resize(2).write_to_buffer(".png")
   end
 
   def blank_tile_png
