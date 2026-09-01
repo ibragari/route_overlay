@@ -23,13 +23,8 @@ class MosaicRenderer
     @tile_fetcher = tile_fetcher
     @zoom = zoom
 
-    center_tile_x = (WebMercator.lon_to_x(center_lon, zoom) / WebMercator::TILE_SIZE).floor
-    center_tile_y = (WebMercator.lat_to_y(center_lat, zoom) / WebMercator::TILE_SIZE).floor
-
-    @origin_tile_x = center_tile_x - tile_radius
-    @origin_tile_y = center_tile_y - tile_radius
-    last_tile_x = center_tile_x + tile_radius
-    last_tile_y = center_tile_y + tile_radius
+    @origin_tile_x, @origin_tile_y, last_tile_x, last_tile_y = WebMercator.tile_range(zoom, center_lon, center_lat,
+                                                                                       tile_radius)
 
     @canvas = ChunkyPNG::Canvas.new(
       (last_tile_x - @origin_tile_x + 1) * WebMercator::TILE_SIZE,

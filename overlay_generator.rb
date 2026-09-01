@@ -107,7 +107,31 @@ end
 # already-fetched mosaic bitmap (see MosaicRenderer#supersample!) rather
 # than fetching genuinely finer tiles -- that would multiply tile-fetch
 # cost with the whole trip's bounding box; this is a one-time local resize.
-FIXED_RADIUS_SUPERSAMPLE = 4
+# Applies to any window_mode that pans continuously by vehicle position
+# (fixed_radius and dynamic_speed) -- not fixed_zoom, which doesn't pan a
+# variable-radius window at all.
+PAN_SUPERSAMPLE = 4
+
+# Comfortable margin under the ~2^31-byte (2 GiB) ceiling that trips a
+# 32-bit size-overflow guard somewhere in ffmpeg's own image-size validation
+# -- found empirically: a dynamic_speed clip whose actual speed profile
+# produced a 23x23-tile (5888px) native mosaic failed outright with
+# "Picture size 23552x23552 is invalid" at 4x supersample (23552^2*4 bytes
+# is ~2.07 GiB, just over that ceiling). fixed_radius's typically small
+# configured radius never gets close to this in practice, but dynamic_speed
+# mosaics are sized for max_radius_meters, which can be large enough to
+# reach it on some clips/trips.
+MAX_SUPERSAMPLED_CANVAS_BYTES = 1_500_000_000
+
+# Picks the largest supersample no larger than desired_supersample that
+# keeps the final (native_dim_px * supersample) square RGBA canvas under
+# MAX_SUPERSAMPLED_CANVAS_BYTES -- falling back to a smaller supersample
+# (in the worst case, none at all) instead of crashing. Panning precision
+# degrades gracefully rather than failing outright.
+def safe_supersample(native_dim_px, desired_supersample)
+  candidates = [4, 2, 1].select { |s| s <= desired_supersample }
+  candidates.find { |s| (((native_dim_px * s)**2) * 4) <= MAX_SUPERSAMPLED_CANVAS_BYTES } || 1
+end
 
 # Picks the mosaic zoom level and the real-world radius (meters) that the
 # margin around the trip bbox must cover so panning/zooming never runs past
@@ -141,6 +165,31 @@ def current_radius_meters(config, speed_kmh)
   d.min_radius_meters + ((d.max_radius_meters - d.min_radius_meters) * t)
 end
 
+# dynamic_speed only: computes each point's target zoom radius from a
+# CENTERED, real-time-windowed average of speed_kmh (not a causal filter),
+# then maps that through current_radius_meters. Centering lets the zoom
+# start widening/narrowing slightly ahead of a real speed change rather
+# than only reacting after it. Computed once, globally, over the whole
+# trip's continuous point sequence -- not per clip -- so there is no reset
+# and therefore no discontinuity at clip boundaries (clips are just
+# different frame ranges over this same, already-smoothed sequence).
+# window_seconds <= 0 disables smoothing (uses raw speed_kmh per point).
+def assign_dynamic_radii!(trip_points, config, window_seconds)
+  trip_points.each_with_index do |p, i|
+    speed = if window_seconds.to_f <= 0
+              p.speed_kmh || 0.0
+            else
+              lo = i
+              lo -= 1 while lo.positive? && (p.time - trip_points[lo - 1].time) <= window_seconds / 2.0
+              hi = i
+              hi += 1 while hi < trip_points.size - 1 && (trip_points[hi + 1].time - p.time) <= window_seconds / 2.0
+              window_points = trip_points[lo..hi]
+              window_points.sum { |wp| wp.speed_kmh || 0.0 } / window_points.size
+            end
+    p.dynamic_radius_m = current_radius_meters(config, speed)
+  end
+end
+
 # Crop window size (mosaic pixels) for a given frame, honoring window_mode.
 # For dynamic_speed this is the *desired* window for the current speed -- it
 # feeds the scale stage, not the crop stage (see outer_crop_size_px).
@@ -168,10 +217,10 @@ end
 
 # dynamic_speed only: the `scale` stage's per-frame output size that,
 # combined with the constant outer crop above, produces an effective window
-# of current_radius_meters(speed) across the final inset_size crop.
-def zoom_scale_size_px(config, inset_size_px, speed_kmh)
-  radius = current_radius_meters(config, speed_kmh)
-  ((inset_size_px.to_f * config.map.dynamic_speed.max_radius_meters) / radius).round
+# of radius_m (the frame's precomputed, already-smoothed target radius --
+# see assign_dynamic_radii!) across the final inset_size crop.
+def zoom_scale_size_px(config, inset_size_px, radius_m)
+  ((inset_size_px.to_f * config.map.dynamic_speed.max_radius_meters) / radius_m).round
 end
 
 # ffmpeg's image2 demuxer re-decodes the source file on every single output
@@ -209,10 +258,64 @@ def write_sendcmd(path, frame_states, mosaic, fps, config, actual_mpp, inset_siz
       angle_rad = fs.course_deg * Math::PI / 180.0
       cmds = [+"crop x #{x}", +"crop y #{y}", format("rotate angle %.6f", angle_rad)]
       if dynamic
-        scale_size = zoom_scale_size_px(config, inset_size_px, fs.speed_kmh)
+        scale_size = zoom_scale_size_px(config, inset_size_px, fs.dynamic_radius_m)
         cmds += ["scale w #{scale_size}", "scale h #{scale_size}"]
       end
       f.puts "#{t} #{cmds.join(', ')};"
+    end
+  end
+end
+
+# dynamic_speed only: renders one inset_size x inset_size RGBA raw frame
+# (ready for ffmpeg's rawvideo stdin) for a single frame state, by cropping
+# variant (the route-drawn, NATIVE-resolution Vips::Image mosaic -- no
+# supersampling needed here, see desired_supersample's comment) to the
+# exact real-world radius fs.dynamic_radius_m around (fs.lon, fs.lat), then
+# resizing that window down to exactly inset_size x inset_size, in a single
+# `affine` call with an explicit oarea (rather than extract_area+affine+
+# extract_area+thumbnail_image, which was measured to be catastrophically
+# slower -- ~48ms/frame vs ~1-2ms/frame -- almost certainly because it
+# builds and evaluates a full native-resolution intermediate region on
+# every frame before downsampling, instead of letting vips compute only the
+# inset_size x inset_size output pixels it actually needs).
+#
+# Sub-pixel accuracy (the reason PAN_SUPERSAMPLE exists for the ffmpeg-side
+# mechanism fixed_radius/fixed_zoom still use) comes from vips' `affine`
+# with bilinear interpolation, not from any oversized canvas.
+#
+# affine's matrix/odx convention here is the INVERSE of what a naive
+# "multiply by the forward scale factor" reading suggests -- verified
+# empirically against a known gradient image before trusting this (see the
+# plan this was built from): matrix entries are 1/scale (not scale), and
+# odx/ody are -x0f/scale (not -x0f), i.e. everything is expressed in
+# *output*-relative terms, not source-relative terms.
+def render_dynamic_frame(variant, mosaic, native_mpp, inset_size, fs, bilinear)
+  cx, cy = mosaic.to_pixel(fs.lon, fs.lat)
+  size_f = (2.0 * fs.dynamic_radius_m) / native_mpp
+  size_f = [size_f, variant.width, variant.height].min # never request a window bigger than the mosaic
+
+  x0f = (cx - (size_f / 2.0)).clamp(0.0, variant.width - size_f)
+  y0f = (cy - (size_f / 2.0)).clamp(0.0, variant.height - size_f)
+
+  inv_scale = inset_size / size_f
+  frame = variant.affine([inv_scale, 0, 0, inv_scale], odx: -x0f * inv_scale, ody: -y0f * inv_scale,
+                          interpolate: bilinear, oarea: [0, 0, inset_size, inset_size], background: [0, 0, 0, 0])
+  frame = frame.bandjoin(255) if frame.bands == 3 # defensive -- variant is 4-band RGBA throughout this codebase
+  frame.write_to_memory
+end
+
+# dynamic_speed only: with Ruby now owning per-frame crop position/size
+# (see render_dynamic_frame), the marker's rotate angle is the ONLY thing
+# still driven by ffmpeg's sendcmd for this path -- no more crop x/y or
+# scale w/h commands (those belonged to the now-removed ffmpeg-side zoom
+# mechanism; see write_sendcmd, still used unchanged by fixed_radius/
+# fixed_zoom).
+def write_rotate_sendcmd(path, frame_states, fps)
+  File.open(path, "w") do |f|
+    frame_states.each do |fs|
+      t = format("%.6f", fs.frame_index / fps.to_f)
+      angle_rad = fs.course_deg * Math::PI / 180.0
+      f.puts "#{t} rotate angle #{format('%.6f', angle_rad)};"
     end
   end
 end
@@ -251,8 +354,88 @@ def codec_args(codec, output_path)
   end
 end
 
+# dynamic_speed only: spawns ffmpeg with its map input as a writable
+# rawvideo stdin pipe instead of a static concat-demuxer image, and streams
+# one already-correct (Ruby/vips-cropped+resized) RGBA frame per output
+# frame into it. alphamerge (shape clipping), border overlay, and marker
+# rotate+overlay stay exactly the fixed-size, always-reliable operations
+# they are today -- only the map layer's *source* changes, so this needs no
+# fps-duplication or crop/scale filter stages for the map at all.
+def encode_dynamic_speed_main(config, clip_name, work_dir, variant, mosaic, native_mpp, inset_size,
+                               main_frame_states, fps, total_duration, main_total_frames,
+                               mask_path, border_path, marker_path, main_output, main_codec_args, blank_frames)
+  f0 = main_frame_states.first
+  angle0 = f0.course_deg * Math::PI / 180.0
+
+  rotate_sendcmd_path = File.join(work_dir, "sendcmd.txt")
+  write_rotate_sendcmd(rotate_sendcmd_path, main_frame_states, fps)
+
+  border_stage = if config.inset.border.enabled
+                   "[mapclipped][3:v]overlay=0:0:format=auto[bordered];\n"
+                 else
+                   "[mapclipped]copy[bordered];\n"
+                 end
+
+  filter_graph = <<~FILTER
+    [0:v][2:v]alphamerge[mapclipped];
+    #{border_stage}[1:v]sendcmd=f='#{rotate_sendcmd_path.gsub('\\', '/').gsub(':', '\:')}'[markercmd];
+    [markercmd]rotate=angle=#{format('%.6f', angle0)}:fillcolor=black@0.0:ow=iw:oh=ih[markerrot];
+    [bordered][markerrot]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2:format=auto[final]
+  FILTER
+  File.write(File.join(work_dir, "filter_complex.txt"), filter_graph) # debugging only, same as the other path
+
+  cmd = [
+    "ffmpeg", "-y",
+    "-f", "rawvideo", "-pix_fmt", "rgba", "-video_size", "#{inset_size}x#{inset_size}",
+    "-framerate", fps.to_s, "-i", "pipe:0",
+    "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", marker_path,
+    "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", mask_path,
+    "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", (config.inset.border.enabled ? border_path : mask_path),
+    "-filter_complex", filter_graph,
+    "-map", "[final]",
+    "-frames:v", main_total_frames.to_s
+  ]
+  cmd += ["-start_number", blank_frames.to_s] if config.output.codec == "png_sequence" && blank_frames.positive?
+  cmd += main_codec_args
+
+  puts "[#{clip_name}] encoding (dynamic_speed, Ruby-side per-frame crop+resize) -> #{main_output}"
+  encode_started_at = Time.now
+
+  # variant is still a lazy vips pipeline (every tile insert + the drawn
+  # route line) -- without materializing it once here, each frame's
+  # extract_area below would re-walk/recompute that whole pipeline from
+  # scratch (confirmed: 120 frames took 75s before this fix, vs. under a
+  # second per frame expected). copy_memory forces evaluation once into a
+  # real in-memory buffer, so every subsequent per-frame crop is a cheap
+  # random-access read.
+  materialized = variant.copy_memory
+  bilinear = Vips::Interpolate.new("bilinear")
+  io = IO.popen(cmd, "wb")
+  begin
+    main_frame_states.each { |fs| io.write(render_dynamic_frame(materialized, mosaic, native_mpp, inset_size, fs, bilinear)) }
+  rescue Errno::EPIPE
+    puts "[#{clip_name}] ffmpeg closed its input early (broken pipe) -- checking exit status"
+  ensure
+    begin
+      io.close unless io.closed?
+    rescue Errno::EPIPE, IOError
+      # exit status (checked below) is the authoritative signal either way
+    end
+  end
+
+  status = $?
+  raise "ffmpeg failed for #{clip_name} (exit status #{status&.exitstatus.inspect})" unless status&.success?
+
+  puts "[#{clip_name}] encoded in #{format('%.1f', Time.now - encode_started_at)}s"
+end
+
 def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time, duration_seconds, nframes, work_root)
   fps = config.output.fps
+  if config.map.window_mode == "dynamic_speed" && MOSAIC_RENDERER_CLASS != VipsMosaicRenderer
+    raise "map.window_mode: dynamic_speed requires the libvips backend for fast per-frame sub-pixel " \
+          "crop+resize -- chunky_png has no fast primitive for this (see lib/vips_support.rb for how to " \
+          "install libvips), or switch map.window_mode to fixed_radius/fixed_zoom."
+  end
   total_frames = nframes || (duration_seconds * fps).round
   raise "Computed 0 output frames for #{clip_path}" if total_frames <= 0
 
@@ -278,7 +461,8 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
   puts "[#{clip_name}] #{blank_frames} leading frame(s) have no GPS fix yet -- will render transparent" if blank_frames.positive?
   main_frame_states = frame_states[blank_frames..].each_with_index.map do |fs, i|
     FramePlanner::FrameState.new(frame_index: i, lon: fs.lon, lat: fs.lat, speed_kmh: fs.speed_kmh,
-                                  course_deg: fs.course_deg, reveal_index: fs.reveal_index)
+                                  course_deg: fs.course_deg, reveal_index: fs.reveal_index,
+                                  dynamic_radius_m: fs.dynamic_radius_m)
   end
   main_total_frames = main_frame_states.size
 
@@ -290,8 +474,6 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
   if main_total_frames.positive?
     avg_lat = trip_points.sum(&:lat) / trip_points.size
     zoom, native_mpp, max_radius = zoom_and_max_radius(config, avg_lat, inset_size)
-    supersample = config.map.window_mode == "fixed_radius" ? FIXED_RADIUS_SUPERSAMPLE : 1
-    actual_mpp = native_mpp / supersample.to_f
 
     tile_fetcher = TileFetcher.new(
       cache_dir: resolve(config_dir, config.map.tile_cache_dir),
@@ -323,12 +505,31 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
 
     half_extent_m = clip_half_span_m + max_radius + 50 # a little slack beyond the largest window ever shown
     tile_radius = (half_extent_m / (native_mpp * WebMercator::TILE_SIZE)).ceil + 1
-    stream_w = (((2 * tile_radius) + 1) * WebMercator::TILE_SIZE) * supersample
+    native_stream_dim = ((2 * tile_radius) + 1) * WebMercator::TILE_SIZE
+
+    # Native mosaic size (tile_radius above) never depends on supersample,
+    # so it's computed first, then used here to pick the largest supersample
+    # that still keeps the final canvas safe -- see safe_supersample's
+    # comment for why this check exists. dynamic_speed no longer needs
+    # ffmpeg-side supersampling -- its sub-pixel accuracy now comes from
+    # vips' bilinear `affine` in render_dynamic_frame, operating directly
+    # on the native-resolution mosaic.
+    desired_supersample = config.map.window_mode == "fixed_radius" ? PAN_SUPERSAMPLE : 1
+    supersample = safe_supersample(native_stream_dim, desired_supersample)
+    actual_mpp = native_mpp / supersample.to_f
+    stream_w = native_stream_dim * supersample
     stream_h = stream_w
 
-    puts "[#{clip_name}] fetching/stitching map mosaic (#{(2 * tile_radius) + 1}x#{(2 * tile_radius) + 1} tiles) " \
-         "at zoom #{zoom} (#{format('%.2f', actual_mpp)} m/px effective, supersample #{supersample}x)"
-    mosaic_started_at = Time.now
+    origin_tile_x, origin_tile_y, last_tile_x, last_tile_y = WebMercator.tile_range(zoom, clip_center_lon,
+                                                                                     clip_center_lat, tile_radius)
+    puts "[#{clip_name}] fetching #{(2 * tile_radius) + 1}x#{(2 * tile_radius) + 1} map tiles at zoom #{zoom} " \
+         "(#{format('%.2f', actual_mpp)} m/px effective, supersample #{supersample}x)"
+    fetch_started_at = Time.now
+    tile_fetcher.prefetch(zoom, origin_tile_x, last_tile_x, origin_tile_y, last_tile_y)
+    puts "[#{clip_name}] fetched tiles in #{format('%.1f', Time.now - fetch_started_at)}s"
+
+    puts "[#{clip_name}] stitching map mosaic"
+    stitch_started_at = Time.now
     mosaic = MOSAIC_RENDERER_CLASS.new(tile_fetcher, zoom: zoom, center_lon: clip_center_lon,
                                                       center_lat: clip_center_lat, tile_radius: tile_radius)
 
@@ -337,13 +538,22 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
     end
     variant = mosaic.with_route(pixel_point_runs, config.route.color, config.route.line_width_px,
                                  config.route.track_line_alpha || 1.0)
-    variant_path = File.join(work_dir, "route.png")
-    save_variant_image(variant, variant_path)
-    puts "[#{clip_name}] built map mosaic in #{format('%.1f', Time.now - mosaic_started_at)}s"
+    dynamic = config.map.window_mode == "dynamic_speed"
+    unless dynamic
+      variant_path = File.join(work_dir, "route.png")
+      save_variant_image(variant, variant_path)
+    end
+    puts "[#{clip_name}] stitched map mosaic in #{format('%.1f', Time.now - stitch_started_at)}s"
 
+    # dynamic_speed writes its own rotate-only sendcmd.txt (see
+    # encode_dynamic_speed_main/write_rotate_sendcmd) -- Ruby now owns
+    # per-frame crop position/size for that mode, so there's nothing left
+    # for this crop/scale-driving sendcmd script to do there.
     sendcmd_path = File.join(work_dir, "sendcmd.txt")
-    write_sendcmd(sendcmd_path, main_frame_states, mosaic, fps, config, actual_mpp, inset_size, supersample, stream_w,
-                  stream_h)
+    unless dynamic
+      write_sendcmd(sendcmd_path, main_frame_states, mosaic, fps, config, actual_mpp, inset_size, supersample,
+                    stream_w, stream_h)
+    end
 
     shape = config.inset.shape
     corner_radius = InsetAssets.corner_radius_for(shape, inset_size, (inset_size * 0.15).round)
@@ -360,8 +570,10 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
                               config.position_marker.outline_width_px).save(marker_path, :fast_rgba)
 
     total_duration = main_total_frames / fps.to_f
-    map_concat_path = File.join(work_dir, "map_concat.txt")
-    write_single_image_concat(map_concat_path, variant_path, total_duration)
+    unless dynamic
+      map_concat_path = File.join(work_dir, "map_concat.txt")
+      write_single_image_concat(map_concat_path, variant_path, total_duration)
+    end
 
     inset_x, inset_y = corner_offset(config.inset.corner, out_w, out_h, inset_size, config.inset.margin_px)
     center_dx = (inset_x + (inset_size / 2.0)) - (out_w / 2.0)
@@ -369,83 +581,76 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
     puts "[#{clip_name}] rendering #{inset_size}x#{inset_size} inset only -- in Resolve, place it at " \
          "Pan #{center_dx.round}, #{center_dy.round} (center-relative offset) for a #{out_w}x#{out_h} timeline"
 
-    dynamic = config.map.window_mode == "dynamic_speed"
-    f0 = main_frame_states.first
-    px0, py0 = mosaic.to_pixel(f0.lon, f0.lat)
-    px0 *= supersample
-    py0 *= supersample
-    angle0 = f0.course_deg * Math::PI / 180.0
-    size0 = dynamic ? outer_crop_size_px(config, actual_mpp) : crop_size_px(config, actual_mpp, inset_size, f0.speed_kmh)
-    size0 = [size0, [stream_w, stream_h].min].min
-    x0 = (px0 - (size0 / 2.0)).round.clamp(0, stream_w - size0)
-    y0 = (py0 - (size0 / 2.0)).round.clamp(0, stream_h - size0)
-
-    # dynamic_speed's crop window is a CONSTANT size (only x/y vary via
-    # sendcmd) -- a varying crop *size* feeding straight into alphamerge/
-    # overlay hangs ffmpeg outright. The zoom effect instead comes from a
-    # separate, sendcmd-varying `scale` stage, followed by a second
-    # constant-size crop back down to inset_size (its x/y self-center via
-    # crop's own in_w/in_h expressions, no sendcmd needed) -- this confines
-    # the varying frame size to a two-filter island that never reaches the
-    # filters that hung.
-    scale_stage = if dynamic
-                    scale0 = zoom_scale_size_px(config, inset_size, f0.speed_kmh)
-                    <<~SEG
-                      [cropped]scale=w=#{scale0}:h=#{scale0}[zoomed];
-                      [zoomed]crop=w=#{inset_size}:h=#{inset_size}:x=(in_w-out_w)/2:y=(in_h-out_h)/2[mapscaled];
-                    SEG
-                  else
-                    "[cropped]scale=#{inset_size}:#{inset_size}[mapscaled];\n"
-                  end
-
-    # fixed_radius's sub-pixel positioning precision (FIXED_RADIUS_SUPERSAMPLE)
-    # comes from upscaling the mosaic here, in ffmpeg (fast C code) -- doing
-    # it in Ruby (ChunkyPNG's pure-Ruby bilinear resample) was far too slow
-    # at mosaic scale. Scaling before `fps` means each unique concat-demuxer
-    # image is upscaled once; `fps` then cheaply duplicates the already-
-    # scaled frame for held frames instead of re-scaling every duplicate.
-    # flags=neighbor (nearest-neighbor): this upscale exists purely to create
-    # more addressable pixel positions for crop to snap to, not to add
-    # interpolated detail -- a smoothing algorithm here would blur the source
-    # tiles once on the way up and again on the final downscale to inset_size,
-    # visibly softening the map for no benefit.
-    upscale_stage = supersample > 1 ? "[0:v]scale=w=#{stream_w}:h=#{stream_h}:flags=neighbor[upscaled];\n" : ""
-    source_label = supersample > 1 ? "upscaled" : "0:v"
-
-    filter_graph = <<~FILTER
-      #{upscale_stage}[#{source_label}]fps=#{fps},sendcmd=f='#{sendcmd_path.gsub('\\', '/')}'[bg];
-      [bg]crop=w=#{size0}:h=#{size0}:x=#{x0}:y=#{y0}[cropped];
-      #{scale_stage}[mapscaled][2:v]alphamerge[mapclipped];
-      #{config.inset.border.enabled ? "[mapclipped][3:v]overlay=0:0:format=auto[bordered];" : "[mapclipped]copy[bordered];"}
-      [1:v]sendcmd=f='#{sendcmd_path.gsub('\\', '/')}'[markercmd];
-      [markercmd]rotate=angle=#{format('%.6f', angle0)}:fillcolor=black@0.0:ow=iw:oh=ih[markerrot];
-      [bordered][markerrot]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2:format=auto[final]
-    FILTER
-    filter_path = File.join(work_dir, "filter_complex.txt")
-    File.write(filter_path, filter_graph)
-
     main_codec_args = config.output.codec == "png_sequence" ? codec_args(config.output.codec, output_target) :
                                                                 codec_args(config.output.codec, main_output)
 
-    cmd = [
-      "ffmpeg", "-y",
-      "-f", "concat", "-safe", "0", "-i", map_concat_path,
-      "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", marker_path,
-      "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", mask_path,
-      "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", (config.inset.border.enabled ? border_path : mask_path),
-      "-filter_complex_script", filter_path,
-      "-map", "[final]",
-      "-frames:v", main_total_frames.to_s
-    ]
-    cmd += ["-start_number", blank_frames.to_s] if config.output.codec == "png_sequence" && blank_frames.positive?
-    cmd += main_codec_args
+    if dynamic
+      encode_dynamic_speed_main(config, clip_name, work_dir, variant, mosaic, native_mpp, inset_size,
+                                 main_frame_states, fps, total_duration, main_total_frames,
+                                 mask_path, border_path, marker_path, main_output, main_codec_args, blank_frames)
+    else
+      f0 = main_frame_states.first
+      px0, py0 = mosaic.to_pixel(f0.lon, f0.lat)
+      px0 *= supersample
+      py0 *= supersample
+      angle0 = f0.course_deg * Math::PI / 180.0
+      size0 = crop_size_px(config, actual_mpp, inset_size, f0.speed_kmh)
+      size0 = [size0, [stream_w, stream_h].min].min
+      x0 = (px0 - (size0 / 2.0)).round.clamp(0, stream_w - size0)
+      y0 = (py0 - (size0 / 2.0)).round.clamp(0, stream_h - size0)
 
-    puts "[#{clip_name}] encoding -> #{main_output}"
-    encode_started_at = Time.now
-    ok = system(*cmd)
-    raise "ffmpeg failed for #{clip_name}" unless ok
+      scale_stage = "[cropped]scale=#{inset_size}:#{inset_size}[mapscaled];\n"
 
-    puts "[#{clip_name}] encoded in #{format('%.1f', Time.now - encode_started_at)}s"
+      # fixed_radius's sub-pixel positioning precision (PAN_SUPERSAMPLE)
+      # comes from upscaling the mosaic here, in ffmpeg (fast C code) -- doing
+      # it in Ruby (ChunkyPNG's pure-Ruby bilinear resample) was far too slow
+      # at mosaic scale. Scaling before `fps` means each unique concat-demuxer
+      # image is upscaled once; `fps` then cheaply duplicates the already-
+      # scaled frame for held frames instead of re-scaling every duplicate.
+      # flags=neighbor (nearest-neighbor): this upscale exists purely to create
+      # more addressable pixel positions for crop to snap to, not to add
+      # interpolated detail -- a smoothing algorithm here would blur the source
+      # tiles once on the way up and again on the final downscale to inset_size,
+      # visibly softening the map for no benefit.
+      upscale_stage = supersample > 1 ? "[0:v]scale=w=#{stream_w}:h=#{stream_h}:flags=neighbor[upscaled];\n" : ""
+      source_label = supersample > 1 ? "upscaled" : "0:v"
+
+      filter_graph = <<~FILTER
+        #{upscale_stage}[#{source_label}]fps=#{fps},sendcmd=f='#{sendcmd_path.gsub('\\', '/').gsub(':', '\:')}'[bg];
+        [bg]crop=w=#{size0}:h=#{size0}:x=#{x0}:y=#{y0}[cropped];
+        #{scale_stage}[mapscaled][2:v]alphamerge[mapclipped];
+        #{config.inset.border.enabled ? "[mapclipped][3:v]overlay=0:0:format=auto[bordered];" : "[mapclipped]copy[bordered];"}
+        [1:v]sendcmd=f='#{sendcmd_path.gsub('\\', '/').gsub(':', '\:')}'[markercmd];
+        [markercmd]rotate=angle=#{format('%.6f', angle0)}:fillcolor=black@0.0:ow=iw:oh=ih[markerrot];
+        [bordered][markerrot]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2:format=auto[final]
+      FILTER
+      # Written for debugging only -- newer ffmpeg builds dropped
+      # -filter_complex_script entirely, so the graph is now passed inline via
+      # -filter_complex below (system(*cmd)'s array form sends it straight to
+      # ffmpeg's argv, no shell involved, so embedded newlines are safe).
+      filter_path = File.join(work_dir, "filter_complex.txt")
+      File.write(filter_path, filter_graph)
+
+      cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0", "-i", map_concat_path,
+        "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", marker_path,
+        "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", mask_path,
+        "-loop", "1", "-r", fps.to_s, "-t", total_duration.to_s, "-i", (config.inset.border.enabled ? border_path : mask_path),
+        "-filter_complex", filter_graph,
+        "-map", "[final]",
+        "-frames:v", main_total_frames.to_s
+      ]
+      cmd += ["-start_number", blank_frames.to_s] if config.output.codec == "png_sequence" && blank_frames.positive?
+      cmd += main_codec_args
+
+      puts "[#{clip_name}] encoding -> #{main_output}"
+      encode_started_at = Time.now
+      ok = system(*cmd)
+      raise "ffmpeg failed for #{clip_name}" unless ok
+
+      puts "[#{clip_name}] encoded in #{format('%.1f', Time.now - encode_started_at)}s"
+    end
   end
 
   if blank_frames.positive?
@@ -520,6 +725,7 @@ if __FILE__ == $PROGRAM_NAME
   config = OverlayConfig.load(config_path)
 
   trip_points = GpxReader.read(ensure_trip_gpx(config, run_dir))
+  assign_dynamic_radii!(trip_points, config, config.map.dynamic_speed.speed_smoothing_seconds) if config.map.window_mode == "dynamic_speed"
   work_root = File.join(resolve(run_dir, config.output.directory), "work")
 
   explicit_clip = ARGV.shift

@@ -6,7 +6,8 @@
 # see overlay_generator.rb's blank leading frames). Both are derived from a
 # single monotonic sweep since frame time only ever increases.
 class FramePlanner
-  FrameState = Struct.new(:frame_index, :lon, :lat, :speed_kmh, :course_deg, :reveal_index, keyword_init: true)
+  FrameState = Struct.new(:frame_index, :lon, :lat, :speed_kmh, :course_deg, :reveal_index, :dynamic_radius_m,
+                           keyword_init: true)
 
   def initialize(trip_points)
     @points = trip_points
@@ -26,11 +27,11 @@ class FramePlanner
       if t_abs <= @points.first.time
         p = @points.first
         FrameState.new(frame_index: i, lon: p.lon, lat: p.lat, speed_kmh: p.speed_kmh || 0.0,
-                        course_deg: p.course || 0.0, reveal_index: -1)
+                        course_deg: p.course || 0.0, reveal_index: -1, dynamic_radius_m: p.dynamic_radius_m || 0.0)
       elsif idx == last_idx
         p = @points[idx]
         FrameState.new(frame_index: i, lon: p.lon, lat: p.lat, speed_kmh: p.speed_kmh || 0.0,
-                        course_deg: p.course || 0.0, reveal_index: idx)
+                        course_deg: p.course || 0.0, reveal_index: idx, dynamic_radius_m: p.dynamic_radius_m || 0.0)
       else
         p0, p1 = @points[idx], @points[idx + 1]
         span = p1.time - p0.time
@@ -39,7 +40,9 @@ class FramePlanner
         lat = p0.lat + ((p1.lat - p0.lat) * frac)
         speed = (p0.speed_kmh || 0.0) + (((p1.speed_kmh || 0.0) - (p0.speed_kmh || 0.0)) * frac)
         course = lerp_angle_deg(p0.course || 0.0, p1.course || 0.0, frac)
-        FrameState.new(frame_index: i, lon: lon, lat: lat, speed_kmh: speed, course_deg: course, reveal_index: idx)
+        radius = (p0.dynamic_radius_m || 0.0) + (((p1.dynamic_radius_m || 0.0) - (p0.dynamic_radius_m || 0.0)) * frac)
+        FrameState.new(frame_index: i, lon: lon, lat: lat, speed_kmh: speed, course_deg: course, reveal_index: idx,
+                        dynamic_radius_m: radius)
       end
     end
   end

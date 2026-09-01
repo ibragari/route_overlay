@@ -10,6 +10,7 @@ trip.gpx
 # Rendered overlay output (final renders + intermediate work files)
 /overlays/
 /overlays_test/
+test/overlays/
 
 # Source dashcam footage and other video files -- not part of the project
 *.mp4

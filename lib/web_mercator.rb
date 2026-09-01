@@ -40,4 +40,16 @@ module WebMercator
     zoom = ideal_zoom.round.clamp(0, 19)
     [zoom, meters_per_pixel(lat, zoom)]
   end
+
+  # Returns [origin_tile_x, origin_tile_y, last_tile_x, last_tile_y] -- the
+  # whole-tile range covering tile_radius tiles in every direction around
+  # (center_lon, center_lat) at the given zoom. Shared by MosaicRenderer/
+  # VipsMosaicRenderer (for the actual stitching) and TileFetcher#prefetch
+  # (called first, so tile-fetch time and stitch time can be timed and
+  # reported separately) so the two never drift out of sync.
+  def tile_range(zoom, center_lon, center_lat, tile_radius)
+    center_tile_x = (lon_to_x(center_lon, zoom) / TILE_SIZE).floor
+    center_tile_y = (lat_to_y(center_lat, zoom) / TILE_SIZE).floor
+    [center_tile_x - tile_radius, center_tile_y - tile_radius, center_tile_x + tile_radius, center_tile_y + tile_radius]
+  end
 end

@@ -35,6 +35,10 @@ map:
     min_radius_meters: 150      # radius shown while stopped / moving slowly
     max_radius_meters: 600      # radius shown at or above max_speed_kmh
     max_speed_kmh: 80           # speed at which max_radius_meters is reached; scales linearly below this
+    speed_smoothing_seconds: 4  # total width (seconds, >=0) of the centered time window averaged around each
+                                 # point before mapping speed to zoom radius, to avoid frame-to-frame jitter from
+                                 # noisy raw GPS speed and to smooth across clip boundaries; 0 disables. Wider =
+                                 # smoother/more anticipatory but slower to reflect a sudden real speed change.
 
 inset:
   size_px: 400                  # rendered clip is exactly size_px x size_px -- place at 1:1 scale in Resolve

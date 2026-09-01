@@ -3,7 +3,7 @@
 require "rexml/document"
 require "time"
 
-GpxPoint = Struct.new(:time, :lat, :lon, :speed_kmh, :course, keyword_init: true)
+GpxPoint = Struct.new(:time, :lat, :lon, :speed_kmh, :course, :dynamic_radius_m, keyword_init: true)
 
 module GpxReader
   module_function

@@ -22,6 +22,16 @@ class TileFetcher
     FileUtils.mkdir_p(@cache_dir)
   end
 
+  # Ensures every tile in [x_from..x_to] x [y_from..y_to] is downloaded and
+  # cached on disk (a no-op per-tile if already cached). Called up front, so
+  # mosaic construction (MosaicRenderer/VipsMosaicRenderer#initialize) reads
+  # from an already-warm cache and is pure stitching -- letting the caller
+  # time and report tile-fetch time and stitch time separately instead of
+  # them being interleaved (and thus indistinguishable) tile by tile.
+  def prefetch(zoom, x_from, x_to, y_from, y_to)
+    (y_from..y_to).each { |ty| (x_from..x_to).each { |tx| fetch(zoom, tx, ty) } }
+  end
+
   # Returns the local file path for tile (zoom, x, y), downloading it first
   # if not already cached.
   def fetch(zoom, x, y)

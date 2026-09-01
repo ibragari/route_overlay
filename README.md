@@ -137,6 +137,26 @@ Then edit `overlay_config.yml` (in this folder, applies to every trip):
 - `map.window_mode: fixed_radius` and `map.fixed_radius.radius_meters` —
   the primary, recommended zoom mode: a constant real-world radius shown
   around the car regardless of speed. Smaller = more zoomed in.
+- `map.window_mode: dynamic_speed` — an alternative mode where the radius
+  scales with current speed instead of staying constant: `min_radius_meters`
+  is shown while stopped, `max_radius_meters` once speed reaches
+  `max_speed_kmh` (capped there, doesn't zoom out further above it), linearly
+  interpolated in between (e.g. halfway to `max_speed_kmh` shows a radius
+  halfway between the two). Before that speed-to-radius mapping is applied,
+  speed is smoothed by averaging it over a *centered* real-time window
+  around each moment — `speed_smoothing_seconds` sets that window's total
+  width (e.g. `4` averages ±2s around each point) — so the zoom doesn't
+  jitter on noisy raw GPS speed and can start widening/narrowing slightly
+  ahead of a real speed change rather than only reacting after it; `0`
+  disables smoothing. Mechanically, Ruby crops and resizes the map mosaic
+  itself (via libvips) for every output frame and pipes the finished frames
+  straight into ffmpeg — no new tiles are fetched as it zooms, ffmpeg is
+  never asked to resize anything itself. **Requires the libvips backend**
+  (see Requirements above) — chunky_png can't do this fast enough, so this
+  mode refuses to run without vips rather than silently using a slow or
+  broken fallback. Works correctly, but is noticeably slower to render per
+  clip than `fixed_radius` — see "What's not done yet" — so it's opt-in,
+  not the default.
 - `inset.size_px`, `inset.shape`, `inset.border.*` — size and look of the
   rendered square.
 - `route.color`, `route.line_width_px`, `position_marker.*` — route line and
@@ -204,6 +224,20 @@ folder.
   (no visible per-second "jump" between map positions).
 - `fixed_radius` (constant real-world zoom) and `fixed_zoom` (constant tile
   zoom level) window modes.
+- `dynamic_speed` window mode (zoom radius scales with current speed,
+  tight when stopped, wide at highway speed, smoothly interpolated and
+  smoothed against noisy raw GPS speed — see `map.dynamic_speed.*` above).
+  ffmpeg cannot actually resize a filter's output at runtime in a way this
+  project could get working (confirmed by direct testing across ffmpeg
+  versions spanning 2023-2026, including an isolated reproduction that
+  segfaults ffmpeg outright), so this mode instead crops and resizes the
+  map mosaic itself, in Ruby via libvips, for every output frame, and pipes
+  the finished frames straight into ffmpeg over stdin — ffmpeg only ever
+  does the fixed-size compositing (shape mask, border, marker) it's always
+  been reliable at. Requires the libvips backend; refuses to run under
+  chunky_png rather than pretend to work. Meaningfully slower per clip than
+  `fixed_radius` (its mosaic covers a wider area and every frame does a
+  real image resize), so it stays opt-in, not the default.
 - OSM and custom XYZ tile server support, with on-disk tile caching, plus an
   in-memory decoded-tile cache so a clip's many overlapping tile reads don't
   each re-decode the same PNG from scratch.
@@ -228,11 +262,6 @@ folder.
 
 ## What's not done yet
 
-- **`dynamic_speed` window mode** (zoom radius scales with current speed) —
-  implemented and no longer hangs ffmpeg, but the marker positioning and
-  visual quality during the zoom transition were unresolved and it's
-  currently shelved in favor of `fixed_radius`. Present in the config but
-  not recommended for use.
 - **`rotation_mode: heading_up`** — only `north_up` is actually implemented;
   the config option exists but heading-up rotation isn't wired up.
 - **`speed_hud`** — config section exists (`enabled: false`) but there's no
