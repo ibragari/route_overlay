@@ -1,9 +1,10 @@
 # frozen_string_literal: true
 
-# Best-effort detection/loading of libvips (via the ruby-vips gem) for the
-# much faster VipsMosaicRenderer path -- overlay_generator.rb uses this to
-# decide whether to use it or fall back to the pure-Ruby MosaicRenderer.
-# Never raises: any failure to load just means "not available".
+# Best-effort detection/loading of libvips (via the ruby-vips gem), which
+# RouteOverlay requires unconditionally -- overlay_generator.rb checks this
+# once at startup and exits with a clear message if it's not available,
+# rather than failing partway through a render. Never raises itself: any
+# failure to load just means "not available", for the caller to act on.
 #
 # `gem install ruby-vips` installs cleanly on its own (it's ffi-based, no
 # compiler needed), but it still needs the actual libvips native library

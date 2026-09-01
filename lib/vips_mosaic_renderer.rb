@@ -3,18 +3,18 @@
 require "vips"
 require_relative "web_mercator"
 
-# Same interface and behavior as MosaicRenderer (see its docs for the
-# per-clip-mosaic design) but backed by libvips instead of chunky_png --
-# selected automatically instead of MosaicRenderer when vips is available
-# (see vips_support.rb, overlay_generator.rb), since it's meaningfully
-# faster at the tile-stitching + route-drawing + PNG-encoding this project
-# does once per clip.
+# Builds one small stitched-tile mosaic centered on a lon/lat point (see
+# tile_radius), and draws the route on it in a single color -- one instance
+# covers one clip's own portion of the trip, not the whole trip, so a long
+# multi-hour trip doesn't blow this up. Backed by libvips throughout this
+# project (see vips_support.rb, overlay_generator.rb's startup check) for
+# the tile-stitching + route-drawing + PNG-encoding this does once per clip.
 #
 # vips images are immutable -- operations like `insert` return a new image
 # rather than modifying one in place, and drawing requires an explicit
 # `mutate` block (a temporary writable copy, yielding a new immutable image
-# once it ends) -- so unlike MosaicRenderer's bang methods, with_route
-# never modifies @canvas itself, no defensive clone needed.
+# once it ends) -- so with_route never modifies @canvas itself, no
+# defensive clone needed.
 class VipsMosaicRenderer
   attr_reader :canvas, :zoom, :origin_tile_x, :origin_tile_y
 
@@ -31,7 +31,7 @@ class VipsMosaicRenderer
 
     (@origin_tile_y..last_tile_y).each do |ty|
       (@origin_tile_x..last_tile_x).each do |tx|
-        tile_image = @tile_fetcher.fetch_vips_image(zoom, tx, ty)
+        tile_image = @tile_fetcher.fetch_image(zoom, tx, ty)
         tile_image = tile_image.bandjoin(255) if tile_image.bands == 3
         canvas = canvas.insert(tile_image, (tx - @origin_tile_x) * WebMercator::TILE_SIZE,
                                 (ty - @origin_tile_y) * WebMercator::TILE_SIZE)

@@ -6,9 +6,13 @@
 # for every clip in a trip, from the settings in overlay_config.yml.
 #
 # See README-ish comments in lib/*.rb for the mechanics: Ruby builds one
-# static map image per clip (tiles stitched, route drawn on top once), then
-# ffmpeg does all the per-frame compositing -- panning via a generated
-# sendcmd script driving its crop position, marker rotation the same way.
+# static map image per clip (tiles stitched, route drawn on top once).
+# fixed_radius/fixed_zoom then hand that to ffmpeg, which does all the
+# per-frame compositing -- panning via a generated sendcmd script driving
+# its crop position, marker rotation the same way. dynamic_speed instead
+# has Ruby crop+resize that map image itself, per frame (via libvips), and
+# pipe the results into ffmpeg -- see encode_dynamic_speed_main below for
+# why.
 
 require "optparse"
 require "fileutils"
@@ -17,25 +21,22 @@ require_relative "lib/novatek_gps"
 require_relative "lib/gpx_reader"
 require_relative "lib/web_mercator"
 require_relative "lib/tile_fetcher"
-require_relative "lib/mosaic_renderer"
 require_relative "lib/vips_support"
 require_relative "lib/frame_planner"
 require_relative "lib/inset_assets"
 
-# Mosaic building (tile stitching, route drawing, PNG encoding) is by far
-# the hottest path in this script, run hundreds of times per clip -- vips is
-# dramatically faster at it than pure-Ruby chunky_png, so use it whenever
-# it's actually available (see lib/vips_support.rb for what that requires)
-# and silently fall back to the always-available chunky_png-based
-# MosaicRenderer otherwise. Both classes share the same interface.
-if VipsSupport.available?
-  require_relative "lib/vips_mosaic_renderer"
-  MOSAIC_RENDERER_CLASS = VipsMosaicRenderer
-  puts "[mosaic backend] libvips"
-else
-  MOSAIC_RENDERER_CLASS = MosaicRenderer
-  puts "[mosaic backend] chunky_png (pure Ruby, slower -- see lib/vips_support.rb to speed this up)"
+# RouteOverlay requires libvips unconditionally (mosaic stitching, route
+# drawing, the inset mask/border/marker, and dynamic_speed's per-frame
+# crop+resize all depend on it) -- fail fast with a clear message rather
+# than a Ruby backtrace partway through a render.
+unless VipsSupport.available?
+  warn "RouteOverlay requires libvips, which isn't available (gem load failed).\n" \
+       "Install it with: gem install ruby-vips\n" \
+       "...and make sure the native libvips library is present too -- see lib/vips_support.rb\n" \
+       "for how to install it system-wide or drop a Windows build at vendor/vips_bin."
+  exit 1
 end
+require_relative "lib/vips_mosaic_renderer"
 
 def ffprobe_duration_seconds(path)
   out = `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "#{path}"`
@@ -320,16 +321,8 @@ def write_rotate_sendcmd(path, frame_states, fps)
   end
 end
 
-# variant is a ChunkyPNG::Canvas (MosaicRenderer) or a Vips::Image
-# (VipsMosaicRenderer) depending on which backend is active -- each has its
-# own save API, so dispatch here rather than giving the two renderer
-# classes a fake shared method.
 def save_variant_image(variant, path)
-  if defined?(Vips::Image) && variant.is_a?(Vips::Image)
-    variant.write_to_file(path)
-  else
-    variant.save(path, :fast_rgba)
-  end
+  variant.write_to_file(path)
 end
 
 def corner_offset(corner, out_w, out_h, size_px, margin_px)
@@ -431,11 +424,6 @@ end
 
 def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time, duration_seconds, nframes, work_root)
   fps = config.output.fps
-  if config.map.window_mode == "dynamic_speed" && MOSAIC_RENDERER_CLASS != VipsMosaicRenderer
-    raise "map.window_mode: dynamic_speed requires the libvips backend for fast per-frame sub-pixel " \
-          "crop+resize -- chunky_png has no fast primitive for this (see lib/vips_support.rb for how to " \
-          "install libvips), or switch map.window_mode to fixed_radius/fixed_zoom."
-  end
   total_frames = nframes || (duration_seconds * fps).round
   raise "Computed 0 output frames for #{clip_path}" if total_frames <= 0
 
@@ -530,8 +518,8 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
 
     puts "[#{clip_name}] stitching map mosaic"
     stitch_started_at = Time.now
-    mosaic = MOSAIC_RENDERER_CLASS.new(tile_fetcher, zoom: zoom, center_lon: clip_center_lon,
-                                                      center_lat: clip_center_lat, tile_radius: tile_radius)
+    mosaic = VipsMosaicRenderer.new(tile_fetcher, zoom: zoom, center_lon: clip_center_lon,
+                                                   center_lat: clip_center_lat, tile_radius: tile_radius)
 
     pixel_point_runs = route_runs(trip_points, config.route.privacy_zones || []).map do |run|
       run.map { |p| mosaic.to_pixel(p.lon, p.lat) }
@@ -558,16 +546,16 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
     shape = config.inset.shape
     corner_radius = InsetAssets.corner_radius_for(shape, inset_size, (inset_size * 0.15).round)
     mask_path = File.join(work_dir, "mask.png")
-    InsetAssets.build_mask(inset_size, shape, corner_radius).save(mask_path, :fast_rgba)
+    InsetAssets.build_mask(inset_size, shape, corner_radius).write_to_file(mask_path)
 
     border_path = File.join(work_dir, "border.png")
     InsetAssets.build_border(inset_size, shape, corner_radius, config.inset.border.width_px,
-                              config.inset.border.color).save(border_path, :fast_rgba) if config.inset.border.enabled
+                              config.inset.border.color).write_to_file(border_path) if config.inset.border.enabled
 
     marker_path = File.join(work_dir, "marker.png")
     InsetAssets.build_marker(config.position_marker.radius_px, config.position_marker.color,
                               config.position_marker.outline_color,
-                              config.position_marker.outline_width_px).save(marker_path, :fast_rgba)
+                              config.position_marker.outline_width_px).write_to_file(marker_path)
 
     total_duration = main_total_frames / fps.to_f
     unless dynamic
@@ -602,9 +590,10 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
       scale_stage = "[cropped]scale=#{inset_size}:#{inset_size}[mapscaled];\n"
 
       # fixed_radius's sub-pixel positioning precision (PAN_SUPERSAMPLE)
-      # comes from upscaling the mosaic here, in ffmpeg (fast C code) -- doing
-      # it in Ruby (ChunkyPNG's pure-Ruby bilinear resample) was far too slow
-      # at mosaic scale. Scaling before `fps` means each unique concat-demuxer
+      # comes from upscaling the mosaic here, in ffmpeg (fast C code) rather
+      # than per-frame in Ruby, since this one-time-per-clip upscale is cheap
+      # either way but happening once here (vs. once per output frame) is
+      # strictly less work. Scaling before `fps` means each unique concat-demuxer
       # image is upscaled once; `fps` then cheaply duplicates the already-
       # scaled frame for held frames instead of re-scaling every duplicate.
       # flags=neighbor (nearest-neighbor): this upscale exists purely to create
@@ -658,7 +647,7 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
     if config.output.codec == "png_sequence"
       FileUtils.mkdir_p(output_target)
       blank_png = File.join(work_dir, "blank.png")
-      ChunkyPNG::Canvas.new(inset_size, inset_size, ChunkyPNG::Color::TRANSPARENT).save(blank_png, :fast_rgba)
+      Vips::Image.black(inset_size, inset_size, bands: 4).cast(:uchar).write_to_file(blank_png)
       (0...blank_frames).each { |i| FileUtils.cp(blank_png, File.join(output_target, format("frame_%06d.png", i))) }
     else
       # Two identical opaque-black lavfi sources fed through alphamerge (the

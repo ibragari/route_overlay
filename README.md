@@ -86,19 +86,20 @@ not hardcoded.
   winget install RubyInstallerTeam.RubyWithDevKit.3.4
   ```
   (the `WithDevKit` variant includes the MSYS2/gcc toolchain — not needed
-  for the project itself, but required if you want the optional `libvips`
-  acceleration below, so it's easiest to grab it up front rather than come
-  back for it later). Open a *new* terminal afterward and confirm it worked
-  with `ruby -v`.
+  for the project itself, but useful to have up front since `ruby-vips`
+  below is required, not optional). Open a *new* terminal afterward and
+  confirm it worked with `ruby -v`.
 - `ffmpeg` and `ffprobe` on your `PATH`
 - Network access to fetch map tiles the first time (cached locally after that)
-- Map rendering works out of the box with `chunky_png` (pure Ruby, no native
-  gems needed) but is noticeably slower than the optional `libvips`-backed
-  path — see `lib/vips_support.rb`'s comment for how to enable it
-  (`gem install ruby-vips`, plus libvips itself present on the system or its
-  Windows build dropped at `vendor/vips_bin`). Entirely optional: if vips
-  isn't available, this falls back to `chunky_png` automatically and prints
-  which backend it picked.
+- **`libvips` is required** — mosaic stitching, route drawing, the inset
+  mask/border/marker, and `dynamic_speed`'s per-frame crop+resize all
+  depend on it; there's no pure-Ruby fallback. Install it with
+  `gem install ruby-vips` (installs cleanly on its own — it's ffi-based, no
+  compiler needed), plus the native libvips library itself: either
+  installed system-wide, or a Windows build's `bin` folder dropped at
+  `vendor/vips_bin` (see `lib/vips_support.rb`'s comment for where to get
+  one). If it's missing, the tool prints a clear message and exits rather
+  than failing partway through a render.
 
 ## Usage
 
@@ -151,11 +152,9 @@ Then edit `overlay_config.yml` (in this folder, applies to every trip):
   disables smoothing. Mechanically, Ruby crops and resizes the map mosaic
   itself (via libvips) for every output frame and pipes the finished frames
   straight into ffmpeg — no new tiles are fetched as it zooms, ffmpeg is
-  never asked to resize anything itself. **Requires the libvips backend**
-  (see Requirements above) — chunky_png can't do this fast enough, so this
-  mode refuses to run without vips rather than silently using a slow or
-  broken fallback. Works correctly, but is noticeably slower to render per
-  clip than `fixed_radius` — see "What's not done yet" — so it's opt-in,
+  never asked to resize anything itself. Works correctly, but is noticeably
+  slower to render per clip than `fixed_radius` — see "What's not done yet"
+  — so it's opt-in,
   not the default.
 - `inset.size_px`, `inset.shape`, `inset.border.*` — size and look of the
   rendered square.
@@ -234,16 +233,17 @@ folder.
   map mosaic itself, in Ruby via libvips, for every output frame, and pipes
   the finished frames straight into ffmpeg over stdin — ffmpeg only ever
   does the fixed-size compositing (shape mask, border, marker) it's always
-  been reliable at. Requires the libvips backend; refuses to run under
-  chunky_png rather than pretend to work. Meaningfully slower per clip than
-  `fixed_radius` (its mosaic covers a wider area and every frame does a
-  real image resize), so it stays opt-in, not the default.
+  been reliable at. Meaningfully slower per clip than `fixed_radius` (its
+  mosaic covers a wider area and every frame does a real image resize), so
+  it stays opt-in, not the default.
 - OSM and custom XYZ tile server support, with on-disk tile caching, plus an
   in-memory decoded-tile cache so a clip's many overlapping tile reads don't
   each re-decode the same PNG from scratch.
-- Optional `libvips`-backed rendering (`lib/vips_support.rb`,
-  `lib/vips_mosaic_renderer.rb`) for meaningfully faster mosaic building,
-  with automatic fallback to the always-available `chunky_png` path.
+- All rendering — mosaic stitching, route drawing, the inset mask/border/
+  marker, `dynamic_speed`'s per-frame crop+resize — runs on `libvips`
+  (`lib/vips_support.rb`, `lib/vips_mosaic_renderer.rb`, `lib/inset_assets.rb`),
+  which is required, not optional (see Requirements above) — there's no
+  pure-Ruby fallback path to keep in sync or fall behind.
 - Leading frames before the trip's very first GPS fix (e.g. a clip recorded
   before the GPS chip locked) render as fully transparent instead of a
   frozen marker, keeping the overlay's length matched to the source clip.
