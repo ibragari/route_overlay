@@ -14,6 +14,11 @@ output:
   fps: 60                       # set to match your actual edit timeline, not the source clips
   codec: prores4444             # prores4444 | png_sequence
   directory: ./overlays
+  parallel_clips: 1             # how many clips of a trip to render at once (per_clip mode, no explicit clip
+                                 # argument only -- ignored otherwise). 1 = today's one-at-a-time behavior. Each
+                                 # clip beyond the first spawns its own `ruby overlay_generator.rb` process (no
+                                 # fork on Windows), so this only helps if your machine has CPU/RAM headroom to
+                                 # spare -- start low and watch usage before raising it.
 
 map:
   tile_provider: osm            # osm | custom

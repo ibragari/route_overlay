@@ -49,6 +49,46 @@ def resolve(base_dir, relative_or_absolute)
   File.expand_path(relative_or_absolute, base_dir)
 end
 
+# output.parallel_clips > 1: renders multiple clips of a trip at once,
+# instead of the default one-at-a-time loop. Ruby has no Process.fork on
+# Windows, so "parallel" here means spawning separate `ruby
+# overlay_generator.rb <clip>` subprocesses (each gets its own interpreter
+# and GIL -- genuine OS-level parallelism, not GIL-limited threading) and
+# reusing the existing single-explicit-clip code path rather than
+# duplicating render_clip's logic. Keeps up to max_parallel running at
+# once, refilling as each finishes (Process.wait2, not a fixed-size batch,
+# so a slow clip doesn't stall faster ones queued behind it). Inherits this
+# process's working directory (Process.spawn's default), matching run_dir;
+# config_path is passed explicitly so every subprocess reads the exact same
+# (already-resolved, absolute) config the parent did, regardless of how the
+# parent was invoked.
+def run_clips_in_parallel(clip_paths, config_path, nframes, max_parallel)
+  ruby_script = File.expand_path(__FILE__)
+  pending = clip_paths.dup
+  running = {}
+
+  spawn_next = lambda do
+    next if pending.empty?
+
+    clip_path = pending.shift
+    cmd = ["ruby", ruby_script, clip_path, "--config", config_path]
+    cmd += ["--nframes", nframes.to_s] if nframes
+    running[Process.spawn(*cmd)] = clip_path
+  end
+
+  [max_parallel, clip_paths.size].min.times { spawn_next.call }
+
+  failures = []
+  until running.empty?
+    pid, status = Process.wait2
+    clip_path = running.delete(pid)
+    failures << clip_path unless status.success?
+    spawn_next.call
+  end
+
+  raise "Parallel render failed for: #{failures.join(', ')}" unless failures.empty?
+end
+
 # Makes sure trip.gpx_file exists and is at least as new as every clip in
 # trip.clips_dir, (re-)running the same extraction gps_extractor.rb does if
 # not -- so a fresh set of clips, or clips added/replaced since the last
@@ -741,10 +781,16 @@ if __FILE__ == $PROGRAM_NAME
     clip_paths = Dir.glob(File.join(clips_dir, "*.MP4"), File::FNM_CASEFOLD).sort
     raise "No MP4 clips found in #{clips_dir}" if clip_paths.empty?
 
-    clip_paths.each do |clip_path|
-      start_time, = NovatekGps.clip_time_range(clip_path, utc_offset_hours: config.trip.utc_offset_hours)
-      duration = ffprobe_duration_seconds(clip_path)
-      render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time, duration, options[:nframes], work_root)
+    parallel_clips = (config.output.parallel_clips || 1).to_i
+    if parallel_clips > 1
+      puts "Rendering #{clip_paths.size} clips, up to #{parallel_clips} at once"
+      run_clips_in_parallel(clip_paths, config_path, options[:nframes], parallel_clips)
+    else
+      clip_paths.each do |clip_path|
+        start_time, = NovatekGps.clip_time_range(clip_path, utc_offset_hours: config.trip.utc_offset_hours)
+        duration = ffprobe_duration_seconds(clip_path)
+        render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time, duration, options[:nframes], work_root)
+      end
     end
   end
 end

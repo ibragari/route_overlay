@@ -172,6 +172,13 @@ Then edit `overlay_config.yml` (in this folder, applies to every trip):
   radius_meters}` circles the route line is never drawn inside (e.g. to hide
   it near home) — the line stops before entering one and resumes after.
 - `output.codec` — `prores4444` (alpha video) or `png_sequence`.
+- `output.parallel_clips` — how many clips of a trip to render at once
+  (default `1`, today's one-at-a-time behavior); only applies when
+  rendering every clip in a folder (not a single explicit clip, not
+  `merged` mode). Each clip beyond the first spawns its own
+  `ruby overlay_generator.rb` process (Ruby has no `fork` on Windows), so
+  raising this only helps if your machine actually has CPU/RAM headroom to
+  spare — watch usage and tune from there rather than maxing it out.
 
 **3. `cd` into your trip's clips folder, then render:**
 
