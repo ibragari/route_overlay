@@ -25,19 +25,23 @@ class VipsMosaicRenderer
     @origin_tile_x, @origin_tile_y, last_tile_x, last_tile_y = WebMercator.tile_range(zoom, center_lon, center_lat,
                                                                                        tile_radius)
 
-    width = (last_tile_x - @origin_tile_x + 1) * WebMercator::TILE_SIZE
-    height = (last_tile_y - @origin_tile_y + 1) * WebMercator::TILE_SIZE
-    canvas = Vips::Image.black(width, height, bands: 4).cast(:uchar)
+    across = last_tile_x - @origin_tile_x + 1
 
-    (@origin_tile_y..last_tile_y).each do |ty|
-      (@origin_tile_x..last_tile_x).each do |tx|
+    # Built as one flat arrayjoin rather than a loop of N chained `insert`
+    # calls: vips images are lazy, so N inserts build a pipeline N nodes
+    # deep (one wrapping the last), and tearing that down at once -- GC
+    # unreffing every link in the chain -- recurses one C stack frame per
+    # tile. A wide dynamic_speed mosaic (hundreds+ of tiles) blew the stack
+    # that way (SystemStackError: stack level too deep, inside libvips'
+    # GObject unref during a finalizer). arrayjoin builds the same mosaic
+    # as a single operation node, however many tiles there are.
+    tiles = (@origin_tile_y..last_tile_y).flat_map do |ty|
+      (@origin_tile_x..last_tile_x).map do |tx|
         tile_image = @tile_fetcher.fetch_image(zoom, tx, ty)
-        tile_image = tile_image.bandjoin(255) if tile_image.bands == 3
-        canvas = canvas.insert(tile_image, (tx - @origin_tile_x) * WebMercator::TILE_SIZE,
-                                (ty - @origin_tile_y) * WebMercator::TILE_SIZE)
+        tile_image.bands == 3 ? tile_image.bandjoin(255) : tile_image
       end
     end
-    @canvas = canvas
+    @canvas = Vips::Image.arrayjoin(tiles, across: across)
   end
 
   def to_pixel(lon, lat)
