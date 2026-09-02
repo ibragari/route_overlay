@@ -33,4 +33,3 @@ cfg_dynzoom.yml
 
 # Reference clone of another project (gopro-dashboard-overlay), not part of
 # this one -- it's its own git repo
-/gopro-dashboard-overlay/
