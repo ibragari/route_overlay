@@ -45,7 +45,11 @@ module InsetAssets
       if in_w.positive?
         m.draw_rect!([255], lo + r, lo, in_w, span, fill: true)
         m.draw_rect!([255], lo, lo + r, span, in_w, fill: true)
-      elsif span.positive?
+      elsif !r.positive? && span.positive?
+        # Only the true rect case (r <= 0) wants this full-square fallback.
+        # r == span/2 (circle) also lands here since in_w is exactly 0 then,
+        # but must NOT fill the square -- it relies entirely on the 4
+        # corner circles below, which coincide into one full circle.
         m.draw_rect!([255], lo, lo, span, span, fill: true)
       end
       next unless r.positive?
