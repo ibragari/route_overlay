@@ -162,6 +162,19 @@ Then edit `overlay_config.yml` (in this folder, applies to every trip):
   slower to render per clip than `fixed_radius` — see "What's not done yet"
   — so it's opt-in,
   not the default.
+- `map.tile_provider` — which map tiles to render: `osm` (default,
+  OpenStreetMap's standard look, no API key) or one of three CARTO styles —
+  `carto_positron` (light/muted), `carto_dark_matter` (dark), `carto_voyager`
+  (fuller color). The CARTO presets need `map.tile_api_key.carto` set (free,
+  fair-use tier — get one at https://carto.com/basemaps/apikey; without a
+  key they serve a watermarked "API key required" tile instead of the real
+  map) — all three share that one key. `custom` is also available for any
+  other XYZ tile source (e.g. MapTiler) via `map.custom_tile_url_template`
+  and `map.tile_api_key.custom`. `map.tile_api_key` holds one key per
+  provider family, so adding another named preset later just means adding
+  its own `tile_api_key.<name>` entry rather than replacing an existing one.
+  Each provider caches to its own subfolder under `map.tile_cache_dir`, so
+  switching between them never mixes tiles from different styles.
 - `inset.size_px`, `inset.shape`, `inset.border.*` — size and look of the
   rendered square.
 - `route.color`, `route.line_width_px`, `position_marker.*` — route line and

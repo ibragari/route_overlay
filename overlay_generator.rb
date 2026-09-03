@@ -612,7 +612,7 @@ def render_clip(config, config_dir, run_dir, trip_points, clip_path, start_time,
       cache_dir: resolve(config_dir, config.map.tile_cache_dir),
       provider: config.map.tile_provider,
       custom_url_template: config.map.custom_tile_url_template,
-      custom_api_key: config.map.custom_tile_api_key
+      tile_api_keys: config.map.tile_api_key&.to_h&.transform_keys(&:to_s) || {}
     )
 
     # One mosaic covers this whole clip -- big enough (in whole tiles) to

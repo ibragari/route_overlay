@@ -21,9 +21,15 @@ output:
                                  # spare -- start low and watch usage before raising it.
 
 map:
-  tile_provider: osm            # osm | custom
+  tile_provider: osm            # osm | carto_positron | carto_dark_matter | carto_voyager | custom -- each
+                                 # provider caches to its own tile_cache_dir subfolder, so switching between
+                                 # them never mixes tiles. The carto_* presets need tile_api_key below (free,
+                                 # fair-use tier -- get one at https://carto.com/basemaps/apikey); without it
+                                 # they serve a watermarked "API key required" tile instead of the real map.
   custom_tile_url_template: ""  # only used when tile_provider: custom, e.g. "https://.../{z}/{x}/{y}.png"
-  custom_tile_api_key: ""       # only used when tile_provider: custom, if the provider needs one
+  tile_api_key:                 # per-provider-family API keys -- only the one(s) actually needed are read
+    carto: ""                   # used by all carto_* presets (they share one CARTO account/key)
+    custom: ""                  # only used when tile_provider: custom, if that provider needs a key
   tile_cache_dir: ./tile_cache
   # rotation_mode: north_up     # north_up | heading_up -- INERT: not read by any code yet (map is always
                                  # rendered north-up); heading_up isn't implemented. See README's "What's not done yet".

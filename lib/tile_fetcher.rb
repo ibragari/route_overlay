@@ -12,11 +12,50 @@ class TileFetcher
   USER_AGENT = "dashcam-gps-overlay/1.0 (personal project; contact via GitHub)"
   MIN_REQUEST_INTERVAL = 0.2 # seconds, be polite to the tile server
 
-  def initialize(cache_dir:, provider: "osm", custom_url_template: nil, custom_api_key: nil)
+  # Named raster XYZ tile style presets, selectable via map.tile_provider
+  # alongside "custom". {s} rotates through `subdomains` (by (x+y), same
+  # spread-the-load purpose as OSM's own a/b/c hostnames) and {r} (retina
+  # suffix) is always substituted empty -- this pipeline never requests @2x
+  # tiles. key_group, when present, names the map.tile_api_key.<group>
+  # config entry this preset's key comes from -- several presets from the
+  # same account (e.g. all 3 carto_* styles) share one group/key. Presets
+  # with no key_group (e.g. osm) never send a key. Add new styles here as
+  # they're tried and confirmed working; anything not (yet) in this list is
+  # still reachable via tile_provider: custom + custom_tile_url_template.
+  PRESETS = {
+    "osm" => {
+      url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      subdomains: %w[a b c]
+    },
+    "carto_positron" => {
+      url: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+      subdomains: %w[a b c d],
+      key_group: "carto"
+    },
+    "carto_dark_matter" => {
+      url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+      subdomains: %w[a b c d],
+      key_group: "carto"
+    },
+    "carto_voyager" => {
+      url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+      subdomains: %w[a b c d],
+      key_group: "carto"
+    }
+  }.freeze
+
+  # tile_api_keys: a { "carto" => "...", "custom" => "...", ... } hash of
+  # per-provider-family API keys (map.tile_api_key in config -- see PRESETS'
+  # key_group above for how a preset maps to one of these). Only the group(s)
+  # actually needed by `provider` are ever read; missing/blank entries are
+  # treated as "no key" rather than an error, so an unconfigured key just
+  # falls back to whatever the tile server does without one (e.g. CARTO's
+  # watermark) instead of raising.
+  def initialize(cache_dir:, provider: "osm", custom_url_template: nil, tile_api_keys: {})
     @cache_dir = cache_dir
     @provider = provider
     @custom_url_template = custom_url_template
-    @custom_api_key = custom_api_key
+    @tile_api_keys = tile_api_keys || {}
     @last_request_at = nil
     @image_cache = {}
     FileUtils.mkdir_p(@cache_dir)
@@ -63,19 +102,25 @@ class TileFetcher
   end
 
   def tile_url(zoom, x, y)
-    case @provider
-    when "osm"
-      subdomain = %w[a b c][(x + y) % 3]
-      "https://#{subdomain}.tile.openstreetmap.org/#{zoom}/#{x}/#{y}.png"
-    when "custom"
+    if @provider == "custom"
       raise "map.custom_tile_url_template is not set in config" unless @custom_url_template
 
-      url = @custom_url_template.gsub("{z}", zoom.to_s).gsub("{x}", x.to_s).gsub("{y}", y.to_s)
-      url = "#{url}#{url.include?('?') ? '&' : '?'}key=#{@custom_api_key}" if @custom_api_key && !@custom_api_key.empty?
-      url
+      template = @custom_url_template
+      subdomains = %w[a b c] # only used if the template actually contains {s}
+      key_group = "custom"
+    elsif PRESETS.key?(@provider)
+      template = PRESETS[@provider][:url]
+      subdomains = PRESETS[@provider][:subdomains]
+      key_group = PRESETS[@provider][:key_group]
     else
-      raise "Unknown tile provider #{@provider.inspect}"
+      raise "Unknown map.tile_provider #{@provider.inspect} -- expected \"custom\" or one of: #{PRESETS.keys.join(', ')}"
     end
+
+    url = template.gsub("{z}", zoom.to_s).gsub("{x}", x.to_s).gsub("{y}", y.to_s).gsub("{r}", "")
+    url = url.gsub("{s}", subdomains[(x + y) % subdomains.size]) if url.include?("{s}")
+    api_key = key_group && @tile_api_keys[key_group]
+    url = "#{url}#{url.include?('?') ? '&' : '?'}key=#{api_key}" if api_key && !api_key.empty?
+    url
   end
 
   def download(zoom, x, y)
