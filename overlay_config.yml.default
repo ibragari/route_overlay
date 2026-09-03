@@ -21,14 +21,22 @@ output:
                                  # spare -- start low and watch usage before raising it.
 
 map:
-  tile_provider: osm            # osm | carto_positron | carto_dark_matter | carto_voyager | custom -- each
-                                 # provider caches to its own tile_cache_dir subfolder, so switching between
-                                 # them never mixes tiles. The carto_* presets need tile_api_key below (free,
-                                 # fair-use tier -- get one at https://carto.com/basemaps/apikey); without it
-                                 # they serve a watermarked "API key required" tile instead of the real map.
+  tile_provider: osm            # osm | carto_positron | carto_dark_matter | carto_voyager |
+                                 # maptiler_streets | maptiler_base | maptiler_dataviz | maptiler_outdoor |
+                                 # maptiler_topo | maptiler_winter | maptiler_landscape | maptiler_ocean |
+                                 # maptiler_aquarelle | maptiler_backdrop | maptiler_toner |
+                                 # maptiler_openstreetmap | maptiler_satellite_plain |
+                                 # maptiler_satellite_hybrid | custom -- each provider caches to its own
+                                 # tile_cache_dir subfolder, so switching between them never mixes tiles.
+                                 # carto_* and maptiler_* both need a tile_api_key below (both free, fair-use
+                                 # tier -- https://carto.com/basemaps/apikey and
+                                 # https://cloud.maptiler.com/account/keys/ respectively); without a key
+                                 # carto_* serves a watermarked "API key required" tile, maptiler_* fails
+                                 # the fetch outright.
   custom_tile_url_template: ""  # only used when tile_provider: custom, e.g. "https://.../{z}/{x}/{y}.png"
   tile_api_key:                 # per-provider-family API keys -- only the one(s) actually needed are read
     carto: ""                   # used by all carto_* presets (they share one CARTO account/key)
+    maptiler: ""                # used by all maptiler_* presets (they share one MapTiler account/key)
     custom: ""                  # only used when tile_provider: custom, if that provider needs a key
   tile_cache_dir: ./tile_cache
   # rotation_mode: north_up     # north_up | heading_up -- INERT: not read by any code yet (map is always

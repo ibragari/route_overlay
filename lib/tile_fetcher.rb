@@ -41,7 +41,28 @@ class TileFetcher
       url: "https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
       subdomains: %w[a b c d],
       key_group: "carto"
-    }
+    },
+    # MapTiler: single host (no {s}), tile size baked into the path (256,
+    # matching every other provider here) rather than templated -- their
+    # raster endpoint is https://api.maptiler.com/maps/<style-id>/<tileSize>/{z}/{x}/{y}.png.
+    # Style IDs verified against the live API (real tile fetch, not just
+    # style.json) on 2026-09-03 -- MapTiler's dashboard label differs from
+    # the API id for a couple of these (Base -> basic-v2, Satellite Hybrid ->
+    # hybrid, Satellite Plain -> satellite).
+    "maptiler_streets" => { url: "https://api.maptiler.com/maps/streets-v4/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_base" => { url: "https://api.maptiler.com/maps/basic-v2/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_dataviz" => { url: "https://api.maptiler.com/maps/dataviz/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_outdoor" => { url: "https://api.maptiler.com/maps/outdoor-v2/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_topo" => { url: "https://api.maptiler.com/maps/topo-v2/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_winter" => { url: "https://api.maptiler.com/maps/winter-v2/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_landscape" => { url: "https://api.maptiler.com/maps/landscape/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_ocean" => { url: "https://api.maptiler.com/maps/ocean/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_aquarelle" => { url: "https://api.maptiler.com/maps/aquarelle/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_backdrop" => { url: "https://api.maptiler.com/maps/backdrop/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_toner" => { url: "https://api.maptiler.com/maps/toner-v2/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_openstreetmap" => { url: "https://api.maptiler.com/maps/openstreetmap/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_satellite_plain" => { url: "https://api.maptiler.com/maps/satellite/256/{z}/{x}/{y}.png", key_group: "maptiler" },
+    "maptiler_satellite_hybrid" => { url: "https://api.maptiler.com/maps/hybrid/256/{z}/{x}/{y}.png", key_group: "maptiler" }
   }.freeze
 
   # tile_api_keys: a { "carto" => "...", "custom" => "...", ... } hash of
