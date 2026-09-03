@@ -26,6 +26,7 @@ cfg_dynzoom.yml
 
 # Local tool settings
 /.claude/
+/.idea/
 
 # Optional vendored libvips binaries (see lib/vips_support.rb) -- large,
 # platform-specific, fetched on demand, not part of the source
