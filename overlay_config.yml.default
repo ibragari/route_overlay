@@ -39,8 +39,10 @@ map:
     maptiler: ""                # used by all maptiler_* presets (they share one MapTiler account/key)
     custom: ""                  # only used when tile_provider: custom, if that provider needs a key
   tile_cache_dir: ./tile_cache
-  # rotation_mode: north_up     # north_up | heading_up -- INERT: not read by any code yet (map is always
-                                 # rendered north-up); heading_up isn't implemented. See README's "What's not done yet".
+  rotation_mode: north_up        # north_up | heading_up -- north_up keeps the map fixed with the position marker
+                                 # rotating to match heading; heading_up instead rotates the map itself so the
+                                 # current direction of travel always renders pointing up, and the marker stays
+                                 # fixed pointing up. Works with any window_mode.
 
   window_mode: fixed_radius     # fixed_radius | fixed_zoom | dynamic_speed -- only the matching block below is used
 

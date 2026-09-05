@@ -155,13 +155,16 @@ Then edit `overlay_config.yml` (in this folder, applies to every trip):
   width (e.g. `4` averages ±2s around each point) — so the zoom doesn't
   jitter on noisy raw GPS speed and can start widening/narrowing slightly
   ahead of a real speed change rather than only reacting after it; `0`
-  disables smoothing. Mechanically, Ruby crops and resizes the map mosaic
-  itself (via libvips) for every output frame and pipes the finished frames
-  straight into ffmpeg — no new tiles are fetched as it zooms, ffmpeg is
-  never asked to resize anything itself. Works correctly, but is noticeably
-  slower to render per clip than `fixed_radius` — see "What's not done yet"
-  — so it's opt-in,
-  not the default.
+  disables smoothing.
+- Mechanically, every `window_mode` shares the same renderer: Ruby crops
+  and resizes the map mosaic itself (via libvips) for every output frame
+  and pipes the finished frames straight into ffmpeg — no new tiles are
+  fetched as it zooms/pans, ffmpeg is never asked to resize the map itself.
+- `map.rotation_mode: north_up` (default) keeps the map fixed and rotates
+  the position marker to match heading, same as most simple GPS overlays.
+  `heading_up` instead rotates the *map* so the current direction of travel
+  always renders pointing up, with the marker staying fixed pointing up —
+  works with any `window_mode`.
 - `map.tile_provider` — which map tiles to render: `osm` (default,
   OpenStreetMap's standard look, no API key), one of three CARTO styles —
   `carto_positron` (light/muted), `carto_dark_matter` (dark), `carto_voyager`
@@ -297,8 +300,6 @@ folder.
 
 ## What's not done yet
 
-- **`rotation_mode: heading_up`** — only `north_up` is actually implemented;
-  the config option exists but heading-up rotation isn't wired up.
 - **`speed_hud`** — config section exists (`enabled: false`) but there's no
   code reading or rendering it yet.
 - **`extras` (`north_arrow`, `scale_bar`, `timestamp`)** — listed as config

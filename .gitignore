@@ -32,5 +32,3 @@ cfg_dynzoom.yml
 # platform-specific, fetched on demand, not part of the source
 /vendor/
 
-# Reference clone of another project (gopro-dashboard-overlay), not part of
-# this one -- it's its own git repo
